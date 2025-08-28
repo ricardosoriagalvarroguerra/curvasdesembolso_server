@@ -1,0 +1,12 @@
+__pycache__/
+.venv/
+*.pyc
+.pytest_cache/
+.env
+tests/
+notebooks/
+*.ipynb
+postgres_BDD.xlsx
+~$postgres_BDD.xlsx
+
+
