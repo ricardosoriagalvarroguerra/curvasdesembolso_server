@@ -302,9 +302,14 @@ SELECT
 """
 
 
+@app.get("/", include_in_schema=False)
+def root():
+        """Simple root endpoint to avoid 404 at the base URL."""
+        return {"message": "Curvas de Desembolso API"}
+
 @app.get("/api/health")
 def health():
-	return {"status": "ok"}
+        return {"status": "ok"}
 
 
 @app.options("/api/filters")
