@@ -124,11 +124,14 @@ class PredictionMeta(BaseModel):
 
 class PredictionBandsResponse(BaseModel):
         project_id: str
-        t: List[str]
-        y: List[float]
-        y_hat: List[float]
-        lower: List[float]
-        upper: List[float]
+        k: List[int]
+        p50: List[float]
+        p10: List[float]
+        p90: List[float]
+        p2_5: List[float]
+        p97_5: List[float]
+        project_k: List[int]
+        project_y: List[float]
         meta: PredictionMeta
 
 

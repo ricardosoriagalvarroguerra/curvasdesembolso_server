@@ -11,7 +11,6 @@ from cachetools import TTLCache
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
-from scipy.stats import norm
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import ProgrammingError
@@ -1009,96 +1008,63 @@ def project_timeseries(
 @app.get("/api/curves/{project_id}/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
     project_id: str,
-    method: str = Query("bootstrap", enum=["rolling_std", "bootstrap", "quantile_reg"]),
-    level: float = Query(0.9),
-    smooth: bool = Query(True),
-    min_points: int = Query(8),
+    min_points: int = Query(30),
     db: Session = Depends(get_db),
 ):
-    key = (project_id, method, level, smooth)
+    key = (project_id, min_points)
     if key in pred_cache:
         return pred_cache[key]
 
     ts_resp = project_timeseries(project_id, db=db)
-    t_vals = [p.ym for p in ts_resp.series]
-    y_vals = [p.d for p in ts_resp.series]
-    k_vals = [p.k for p in ts_resp.series]
-    df = pd.DataFrame({"t": pd.to_datetime(t_vals), "y": y_vals, "k": k_vals}).dropna()
-    df.sort_values("t", inplace=True)
-    n = len(df)
-    if n < min_points:
-        raise HTTPException(status_code=400, detail=f"not enough data points ({n} < {min_points})")
+    proj_k = [p.k for p in ts_resp.series]
+    proj_y = [p.d for p in ts_resp.series]
 
-    y_arr = df["y"].to_numpy()
-    x = df["k"].to_numpy()
-    notes = ""
-    if not np.all(np.diff(y_arr) >= -1e-9):
-        notes = "series non-monotonic"
+    filters = FiltersRequest(
+        macrosectors=[ts_resp.project.macrosector_id] if ts_resp.project.macrosector_id else [11, 22, 33, 44, 55, 66],
+        modalities=[ts_resp.project.modality_id] if ts_resp.project.modality_id else [111, 222, 333, 444],
+        countries=[ts_resp.project.country_id] if ts_resp.project.country_id else [],
+        ticketMin=0.0,
+        ticketMax=1_000_000_000.0,
+        yearFrom=2010,
+        yearTo=2024,
+        onlyExited=True,
+    )
 
-    if smooth:
-        try:
-            from statsmodels.nonparametric.smoothers_lowess import lowess
+    rows = _run_base_query(filters, db, status_target="ALL", select_meta=False)
+    if len(rows) < min_points:
+        raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
-            y_hat = lowess(y_arr, x, frac=0.3, return_sorted=False)
-            notes = (notes + ";" if notes else "") + "smooth=lowess"
-        except Exception:
-            y_hat = pd.Series(y_arr).rolling(window=3, min_periods=1, center=True).mean().to_numpy()
-            notes = (notes + ";" if notes else "") + "smooth=moving_avg"
-    else:
-        y_hat = y_arr.copy()
+    df_hist = (
+        pd.DataFrame([(int(r[2]), float(r[3])) for r in rows], columns=["k", "d"]).dropna()
+    )
+    grouped = df_hist.groupby("k")["d"]
+    q = grouped.quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack()
 
-    alpha = 1 - level
-    if method == "rolling_std":
-        resid = y_arr - y_hat
-        window = max(3, int(math.ceil(n / 10)))
-        std = (
-            pd.Series(resid)
-            .rolling(window=window, min_periods=1, center=True)
-            .std()
-            .fillna(resid.std())
-            .to_numpy()
-        )
-        z = norm.ppf(1 - alpha / 2)
-        lower = y_hat - z * std
-        upper = y_hat + z * std
-    elif method == "bootstrap":
-        resid = y_arr - y_hat
-        B = int(os.getenv("BOOTSTRAP_B", "1000"))
-        idx = np.random.randint(0, n, size=(B, n))
-        sims = y_hat + resid[idx]
-        lower = np.percentile(sims, 100 * alpha / 2, axis=0)
-        upper = np.percentile(sims, 100 * (1 - alpha / 2), axis=0)
-    elif method == "quantile_reg":
-        from sklearn.linear_model import QuantileRegressor
-
-        x_norm = (x - x.min()) / (x.max() - x.min()) if n > 1 else x
-        q_low = alpha / 2
-        q_high = 1 - q_low
-        qr_low = QuantileRegressor(quantile=q_low, alpha=0.0).fit(x_norm.reshape(-1, 1), y_arr)
-        qr_high = QuantileRegressor(quantile=q_high, alpha=0.0).fit(x_norm.reshape(-1, 1), y_arr)
-        lower = qr_low.predict(x_norm.reshape(-1, 1))
-        upper = qr_high.predict(x_norm.reshape(-1, 1))
-        if not smooth:
-            qr_mid = QuantileRegressor(quantile=0.5, alpha=0.0).fit(x_norm.reshape(-1, 1), y_arr)
-            y_hat = qr_mid.predict(x_norm.reshape(-1, 1))
-    else:
-        raise HTTPException(status_code=400, detail="invalid method")
+    k_vals = q.index.astype(int).tolist()
+    p50 = q[0.5].tolist()
+    p10 = q[0.10].tolist()
+    p90 = q[0.90].tolist()
+    p2_5 = q[0.025].tolist()
+    p97_5 = q[0.975].tolist()
 
     resp = {
         "project_id": project_id,
-        "t": df["t"].dt.strftime("%Y-%m-%d").tolist(),
-        "y": y_arr.tolist(),
-        "y_hat": y_hat.tolist(),
-        "lower": lower.tolist(),
-        "upper": upper.tolist(),
+        "k": k_vals,
+        "p50": p50,
+        "p10": p10,
+        "p90": p90,
+        "p2_5": p2_5,
+        "p97_5": p97_5,
+        "project_k": proj_k,
+        "project_y": proj_y,
         "meta": {
-            "method": method,
-            "level": level,
-            "smooth": smooth,
-            "num_points": n,
-            "notes": notes,
+            "method": "historical_quantiles",
+            "level": 0.95,
+            "smooth": False,
+            "num_points": int(len(df_hist)),
+            "notes": "",
         },
     }
-    # TODO: ETag/Last-Modified headers
+
     pred_cache[key] = resp
     return resp
