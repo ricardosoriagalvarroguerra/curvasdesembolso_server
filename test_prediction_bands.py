@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+import pandas as pd
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.dirname(__file__))
@@ -150,3 +151,38 @@ def test_prediction_bands_alerts(monkeypatch):
     assert "below_p10_3_months" in j["alerts"]
     assert "above_p90" in j["alerts"]
     assert j["current_percentile"] > 0.99
+
+
+def test_prediction_bands_drop_nan(monkeypatch):
+    def fake_ts(project_id, db=None, yearFrom=2010, yearTo=2024):
+        return _synthetic_series(n=5)
+
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        return _synthetic_rows(n_projects=5, n_k=10)
+
+    def fake_quantile(self, qs):
+        ks = [0, 1, 2]
+        idx = []
+        vals = []
+        for k in ks:
+            for q in qs:
+                idx.append((k, q))
+                if k == 1 and q == 0.10:
+                    vals.append(np.nan)
+                else:
+                    vals.append(0.5)
+        index = pd.MultiIndex.from_tuples(idx, names=["k", None])
+        return pd.Series(vals, index=index)
+
+    monkeypatch.setattr("app.project_timeseries", fake_ts)
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    monkeypatch.setattr(pd.core.groupby.generic.SeriesGroupBy, "quantile", fake_quantile)
+    app_module.pred_cache.clear()
+
+    r = client.get("/api/curves/P1/prediction-bands")
+    assert r.status_code == 200
+    j = r.json()
+    # Ensure NaN values are dropped from quantile output
+    for arr in (j["p50"], j["p10"], j["p90"], j["p2_5"], j["p97_5"]):
+        assert np.isfinite(arr).all()
+    assert 1 not in j["k"]
