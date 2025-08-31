@@ -122,6 +122,12 @@ class PredictionMeta(BaseModel):
         notes: str = ""
 
 
+class EtaMetrics(BaseModel):
+        median: Optional[float] = None
+        p10: Optional[float] = None
+        p90: Optional[float] = None
+
+
 class PredictionBandsResponse(BaseModel):
         project_id: str
         k: List[int]
@@ -132,6 +138,9 @@ class PredictionBandsResponse(BaseModel):
         p97_5: List[float]
         project_k: List[int]
         project_y: List[float]
+        current_percentile: Optional[float] = None
+        eta: EtaMetrics = Field(default_factory=EtaMetrics)
+        alerts: List[str] = Field(default_factory=list)
         meta: PredictionMeta
 
 

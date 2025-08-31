@@ -1047,6 +1047,48 @@ def prediction_bands(
     p2_5 = q[0.025].tolist()
     p97_5 = q[0.975].tolist()
 
+    # Percentile of latest project point within cohort distribution
+    current_percentile = None
+    if proj_k:
+        k_star = proj_k[-1]
+        d_star = proj_y[-1]
+        cohort_vals = df_hist[df_hist["k"] == k_star]["d"]
+        if len(cohort_vals) > 0:
+            current_percentile = float((cohort_vals <= d_star).sum() / len(cohort_vals))
+
+    # Estimate months to reach 95% for median and P10-P90 trajectories
+    def _first_k_ge(curve: List[float], threshold: float = 0.95) -> float | None:
+        for kk, val in zip(k_vals, curve):
+            if val >= threshold:
+                return float(kk)
+        return None
+
+    eta_median = _first_k_ge(p50)
+    eta_p10 = _first_k_ge(p90)  # Fast (top performers)
+    eta_p90 = _first_k_ge(p10)  # Slow (laggards)
+
+    # Alerts based on project performance vs bands
+    p10_map = {k: v for k, v in zip(k_vals, p10)}
+    p90_map = {k: v for k, v in zip(k_vals, p90)}
+    consecutive_under = 0
+    alert_under_p10 = False
+    alert_crossed_p90 = False
+    for k, d in zip(proj_k, proj_y):
+        if k in p10_map and d < p10_map[k]:
+            consecutive_under += 1
+            if consecutive_under >= 3:
+                alert_under_p10 = True
+        else:
+            consecutive_under = 0
+        if k in p90_map and d > p90_map[k]:
+            alert_crossed_p90 = True
+
+    alerts: List[str] = []
+    if alert_under_p10:
+        alerts.append("below_p10_3_months")
+    if alert_crossed_p90:
+        alerts.append("above_p90")
+
     resp = {
         "project_id": project_id,
         "k": k_vals,
@@ -1057,6 +1099,9 @@ def prediction_bands(
         "p97_5": p97_5,
         "project_k": proj_k,
         "project_y": proj_y,
+        "current_percentile": current_percentile,
+        "eta": {"median": eta_median, "p10": eta_p10, "p90": eta_p90},
+        "alerts": alerts,
         "meta": {
             "method": "historical_quantiles",
             "level": 0.95,
