@@ -110,7 +110,25 @@ class ProjectInfo(BaseModel):
 
 
 class ProjectTimeseriesResponse(BaseModel):
-	project: ProjectInfo
-	series: List[ProjectTimeseriesPoint]
+        project: ProjectInfo
+        series: List[ProjectTimeseriesPoint]
+
+
+class PredictionMeta(BaseModel):
+        method: str
+        level: float
+        smooth: bool
+        num_points: int
+        notes: str = ""
+
+
+class PredictionBandsResponse(BaseModel):
+        project_id: str
+        t: List[str]
+        y: List[float]
+        y_hat: List[float]
+        lower: List[float]
+        upper: List[float]
+        meta: PredictionMeta
 
 
