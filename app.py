@@ -1,15 +1,17 @@
 import json
-import numpy as np
 import math
 import os
 import random
 from datetime import date
 from typing import Dict, List, Tuple
 
+import numpy as np
+import pandas as pd
 from cachetools import TTLCache
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
+from scipy.stats import norm
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import ProgrammingError
@@ -17,15 +19,16 @@ from sqlalchemy.orm import Session
 
 from db import get_db, get_engine
 from models import (
-	CurveBand,
-	CurveFitResponse,
-	CurveParams,
-	CurvePoint,
-	FiltersRequest,
-	FiltersResponse,
-	ProjectInfo,
-	ProjectTimeseriesPoint,
-	ProjectTimeseriesResponse,
+        CurveBand,
+        CurveFitResponse,
+        CurveParams,
+        CurvePoint,
+        FiltersRequest,
+        FiltersResponse,
+        PredictionBandsResponse,
+        ProjectInfo,
+        ProjectTimeseriesPoint,
+        ProjectTimeseriesResponse,
 )
 from utils_curve import logistic3, fit_logistic3
 
@@ -53,6 +56,7 @@ app.add_middleware(
 cache = TTLCache(maxsize=128, ttl=int(os.getenv("CACHE_TTL_SECONDS", "180")))
 filters_cache = TTLCache(maxsize=8, ttl=int(os.getenv("FILTERS_CACHE_TTL_SECONDS", "600")))
 ts_cache = TTLCache(maxsize=512, ttl=int(os.getenv("TS_CACHE_TTL_SECONDS", "600")))
+pred_cache = TTLCache(maxsize=256, ttl=int(os.getenv("PRED_CACHE_TTL_SECONDS", "300")))
 
 
 MACROSECTOR_LABELS = {
@@ -1001,3 +1005,100 @@ def project_timeseries(
 	)
 
 
+
+@app.get("/api/curves/{project_id}/prediction-bands", response_model=PredictionBandsResponse)
+def prediction_bands(
+    project_id: str,
+    method: str = Query("bootstrap", enum=["rolling_std", "bootstrap", "quantile_reg"]),
+    level: float = Query(0.9),
+    smooth: bool = Query(True),
+    min_points: int = Query(8),
+    db: Session = Depends(get_db),
+):
+    key = (project_id, method, level, smooth)
+    if key in pred_cache:
+        return pred_cache[key]
+
+    ts_resp = project_timeseries(project_id, db=db)
+    t_vals = [p.ym for p in ts_resp.series]
+    y_vals = [p.d for p in ts_resp.series]
+    k_vals = [p.k for p in ts_resp.series]
+    df = pd.DataFrame({"t": pd.to_datetime(t_vals), "y": y_vals, "k": k_vals}).dropna()
+    df.sort_values("t", inplace=True)
+    n = len(df)
+    if n < min_points:
+        raise HTTPException(status_code=400, detail=f"not enough data points ({n} < {min_points})")
+
+    y_arr = df["y"].to_numpy()
+    x = df["k"].to_numpy()
+    notes = ""
+    if not np.all(np.diff(y_arr) >= -1e-9):
+        notes = "series non-monotonic"
+
+    if smooth:
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess
+
+            y_hat = lowess(y_arr, x, frac=0.3, return_sorted=False)
+            notes = (notes + ";" if notes else "") + "smooth=lowess"
+        except Exception:
+            y_hat = pd.Series(y_arr).rolling(window=3, min_periods=1, center=True).mean().to_numpy()
+            notes = (notes + ";" if notes else "") + "smooth=moving_avg"
+    else:
+        y_hat = y_arr.copy()
+
+    alpha = 1 - level
+    if method == "rolling_std":
+        resid = y_arr - y_hat
+        window = max(3, int(math.ceil(n / 10)))
+        std = (
+            pd.Series(resid)
+            .rolling(window=window, min_periods=1, center=True)
+            .std()
+            .fillna(resid.std())
+            .to_numpy()
+        )
+        z = norm.ppf(1 - alpha / 2)
+        lower = y_hat - z * std
+        upper = y_hat + z * std
+    elif method == "bootstrap":
+        resid = y_arr - y_hat
+        B = int(os.getenv("BOOTSTRAP_B", "1000"))
+        idx = np.random.randint(0, n, size=(B, n))
+        sims = y_hat + resid[idx]
+        lower = np.percentile(sims, 100 * alpha / 2, axis=0)
+        upper = np.percentile(sims, 100 * (1 - alpha / 2), axis=0)
+    elif method == "quantile_reg":
+        from sklearn.linear_model import QuantileRegressor
+
+        x_norm = (x - x.min()) / (x.max() - x.min()) if n > 1 else x
+        q_low = alpha / 2
+        q_high = 1 - q_low
+        qr_low = QuantileRegressor(quantile=q_low, alpha=0.0).fit(x_norm.reshape(-1, 1), y_arr)
+        qr_high = QuantileRegressor(quantile=q_high, alpha=0.0).fit(x_norm.reshape(-1, 1), y_arr)
+        lower = qr_low.predict(x_norm.reshape(-1, 1))
+        upper = qr_high.predict(x_norm.reshape(-1, 1))
+        if not smooth:
+            qr_mid = QuantileRegressor(quantile=0.5, alpha=0.0).fit(x_norm.reshape(-1, 1), y_arr)
+            y_hat = qr_mid.predict(x_norm.reshape(-1, 1))
+    else:
+        raise HTTPException(status_code=400, detail="invalid method")
+
+    resp = {
+        "project_id": project_id,
+        "t": df["t"].dt.strftime("%Y-%m-%d").tolist(),
+        "y": y_arr.tolist(),
+        "y_hat": y_hat.tolist(),
+        "lower": lower.tolist(),
+        "upper": upper.tolist(),
+        "meta": {
+            "method": method,
+            "level": level,
+            "smooth": smooth,
+            "num_points": n,
+            "notes": notes,
+        },
+    }
+    # TODO: ETag/Last-Modified headers
+    pred_cache[key] = resp
+    return resp
