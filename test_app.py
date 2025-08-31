@@ -1,7 +1,10 @@
 import types
+import os
 import random
+import sys
 from fastapi.testclient import TestClient
 
+sys.path.append(os.path.dirname(__file__))
 from app import app
 
 

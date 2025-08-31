@@ -1,9 +1,16 @@
+import os
+import sys
 import numpy as np
 from fastapi.testclient import TestClient
 
+sys.path.append(os.path.dirname(__file__))
+import app as app_module
 from app import app
-from models import ProjectInfo, ProjectTimeseriesPoint, ProjectTimeseriesResponse
-
+from models import (
+    ProjectInfo,
+    ProjectTimeseriesPoint,
+    ProjectTimeseriesResponse,
+)
 
 client = TestClient(app)
 
@@ -25,41 +32,60 @@ def _synthetic_series(n=20, noise=0.02, zeros=False):
                 d=d,
             )
         )
-    return ProjectTimeseriesResponse(project=ProjectInfo(iatiidentifier="P1", country_id=None, macrosector_id=None, modality_id=None, approved_amount=None), series=series)
+    return ProjectTimeseriesResponse(
+        project=ProjectInfo(
+            iatiidentifier="P1",
+            country_id=None,
+            macrosector_id=None,
+            modality_id=None,
+            approved_amount=None,
+        ),
+        series=series,
+    )
 
 
-def test_prediction_bands_methods(monkeypatch):
+def _synthetic_rows(n_projects=5, n_k=20, noise=0.02, zeros=False):
+    rows = []
+    for pid in range(n_projects):
+        for k in range(n_k):
+            if zeros:
+                d = 0.0
+            else:
+                base = 1.0 / (1.0 + np.exp(-0.2 * (k - 10)))
+                d = float(max(0.0, min(1.0, base + np.random.uniform(-noise, noise))))
+            rows.append((f"P{pid}", None, k, d, 1_000_000.0, "XX", 0, 11, 111, 2020))
+    return rows
+
+
+def test_prediction_bands_quantiles(monkeypatch):
     def fake_ts(project_id, db=None, yearFrom=2010, yearTo=2024):
         return _synthetic_series()
 
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        return _synthetic_rows()
+
     monkeypatch.setattr("app.project_timeseries", fake_ts)
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
 
-    # rolling_std
-    r = client.get("/api/curves/P1/prediction-bands?method=rolling_std")
+    r = client.get("/api/curves/P1/prediction-bands")
     assert r.status_code == 200
     j = r.json()
-    assert j["meta"]["method"] == "rolling_std"
-    assert len(j["t"]) == 20
-
-    # bootstrap
-    monkeypatch.setenv("BOOTSTRAP_B", "100")
-    r = client.get("/api/curves/P1/prediction-bands?method=bootstrap")
-    assert r.status_code == 200
-    j = r.json()
-    assert j["meta"]["method"] == "bootstrap"
-
-    # quantile_reg
-    r = client.get("/api/curves/P1/prediction-bands?method=quantile_reg&smooth=false")
-    assert r.status_code == 200
-    j = r.json()
-    assert j["meta"]["method"] == "quantile_reg"
+    assert j["meta"]["method"] == "historical_quantiles"
+    assert len(j["k"]) == len(j["p50"]) == len(j["p10"]) == len(j["p90"]) == len(j["p2_5"]) == len(j["p97_5"])
+    assert len(j["project_k"]) == len(j["project_y"])
 
 
 def test_prediction_bands_min_points(monkeypatch):
     def fake_ts(project_id, db=None, yearFrom=2010, yearTo=2024):
-        return _synthetic_series(n=5)
+        return _synthetic_series()
+
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        return _synthetic_rows(n_projects=1, n_k=2)
 
     monkeypatch.setattr("app.project_timeseries", fake_ts)
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
 
     r = client.get("/api/curves/P1/prediction-bands")
     assert r.status_code == 400
@@ -69,11 +95,16 @@ def test_prediction_bands_zero_series(monkeypatch):
     def fake_ts(project_id, db=None, yearFrom=2010, yearTo=2024):
         return _synthetic_series(n=10, zeros=True)
 
-    monkeypatch.setattr("app.project_timeseries", fake_ts)
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        return _synthetic_rows(n_projects=5, n_k=10, zeros=True)
 
-    r = client.get("/api/curves/P1/prediction-bands?method=rolling_std")
+    monkeypatch.setattr("app.project_timeseries", fake_ts)
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
+
+    r = client.get("/api/curves/P1/prediction-bands")
     assert r.status_code == 200
     j = r.json()
-    assert all(abs(v) < 1e-8 for v in j["y_hat"])  # all zeros
-    assert all(abs(v) < 1e-8 for v in j["lower"]) and all(abs(v) < 1e-8 for v in j["upper"])
-
+    assert all(abs(v) < 1e-8 for v in j["p50"])
+    assert all(abs(v) < 1e-8 for v in j["p10"]) and all(abs(v) < 1e-8 for v in j["p90"])
+    assert all(abs(v) < 1e-8 for v in j["p2_5"]) and all(abs(v) < 1e-8 for v in j["p97_5"])
