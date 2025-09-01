@@ -1108,6 +1108,18 @@ def prediction_bands(
     p2_5 = q[0.025].tolist()
     p97_5 = q[0.975].tolist()
 
+    bands = [
+        {
+            "k": k,
+            "p50": m,
+            "p10": lo,
+            "p90": hi,
+            "p2_5": lo2,
+            "p97_5": hi2,
+        }
+        for k, m, lo, hi, lo2, hi2 in zip(k_vals, p50, p10, p90, p2_5, p97_5)
+    ]
+
     # Percentile of latest project point within cohort distribution
     current_percentile = None
     if proj_k:
@@ -1158,6 +1170,7 @@ def prediction_bands(
         "p90": p90,
         "p2_5": p2_5,
         "p97_5": p97_5,
+        "bands": bands,
         "project_k": proj_k,
         "project_y": proj_y,
         "current_percentile": current_percentile,

@@ -75,6 +75,16 @@ def test_prediction_bands_quantiles(monkeypatch):
     assert j["meta"]["method"] == "historical_quantiles"
     assert len(j["k"]) == len(j["p50"]) == len(j["p10"]) == len(j["p90"]) == len(j["p2_5"]) == len(j["p97_5"])
     assert len(j["project_k"]) == len(j["project_y"])
+    assert len(j["bands"]) == len(j["k"])
+    for bp, k, p50, p10, p90, p2_5, p97_5 in zip(
+        j["bands"], j["k"], j["p50"], j["p10"], j["p90"], j["p2_5"], j["p97_5"],
+    ):
+        assert bp["k"] == k
+        assert bp["p50"] == p50
+        assert bp["p10"] == p10
+        assert bp["p90"] == p90
+        assert bp["p2_5"] == p2_5
+        assert bp["p97_5"] == p97_5
     assert "current_percentile" in j and 0.0 <= j["current_percentile"] <= 1.0
     assert j["eta"]["median"] is not None
     assert isinstance(j["alerts"], list)

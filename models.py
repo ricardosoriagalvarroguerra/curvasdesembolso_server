@@ -123,24 +123,36 @@ class PredictionMeta(BaseModel):
 
 
 class EtaMetrics(BaseModel):
-        median: Optional[float] = None
-        p10: Optional[float] = None
-        p90: Optional[float] = None
+    median: Optional[float] = None
+    p10: Optional[float] = None
+    p90: Optional[float] = None
+
+
+class PredictionBandPoint(BaseModel):
+    """Single prediction band point across quantiles."""
+
+    k: int
+    p50: float
+    p10: float
+    p90: float
+    p2_5: float
+    p97_5: float
 
 
 class PredictionBandsResponse(BaseModel):
-        project_id: str
-        k: List[int]
-        p50: List[float]
-        p10: List[float]
-        p90: List[float]
-        p2_5: List[float]
-        p97_5: List[float]
-        project_k: List[int]
-        project_y: List[float]
-        current_percentile: Optional[float] = None
-        eta: EtaMetrics = Field(default_factory=EtaMetrics)
-        alerts: List[str] = Field(default_factory=list)
-        meta: PredictionMeta
+    project_id: str
+    k: List[int]
+    p50: List[float]
+    p10: List[float]
+    p90: List[float]
+    p2_5: List[float]
+    p97_5: List[float]
+    project_k: List[int]
+    project_y: List[float]
+    current_percentile: Optional[float] = None
+    eta: EtaMetrics = Field(default_factory=EtaMetrics)
+    alerts: List[str] = Field(default_factory=list)
+    meta: PredictionMeta
+    bands: List[PredictionBandPoint] | None = None
 
 
