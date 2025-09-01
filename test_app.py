@@ -1,4 +1,3 @@
-import types
 import os
 import random
 import sys
@@ -19,7 +18,6 @@ def test_health():
 
 def test_curve_fit_monkeypatch(monkeypatch):
     # Monkeypatch the base query to avoid DB
-    from app import _run_base_query
 
     def fake_run_base_query(filters, db, status_target='ALL', *, select_meta=True):
         # Generate synthetic logistic-ish data for multiple projects

@@ -2,18 +2,15 @@ import json
 import math
 import os
 import random
-from datetime import date
-from typing import Dict, List, Tuple, Set
+from typing import List, Tuple, Set
 
 import numpy as np
 import pandas as pd
 from cachetools import TTLCache
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import Row
-from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from db import get_db, get_engine
@@ -845,9 +842,12 @@ def fit_curve(payload: FiltersRequest, db: Session = Depends(get_db)):
 			k30_b = solve_k_local(0.3)
 			k50_b = solve_k_local(0.5)
 			k80_b = solve_k_local(0.8)
-			if k30_b is not None: k30_samples.append(k30_b)
-			if k50_b is not None: k50_samples.append(k50_b)
-			if k80_b is not None: k80_samples.append(k80_b)
+			if k30_b is not None:
+				k30_samples.append(k30_b)
+			if k50_b is not None:
+				k50_samples.append(k50_b)
+			if k80_b is not None:
+				k80_samples.append(k80_b)
 		# Percentiles
 		def pct(arr: list[float], p_low: float = 2.5, p_hi: float = 97.5):
 			if not arr:
