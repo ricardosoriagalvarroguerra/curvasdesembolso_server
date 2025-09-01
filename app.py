@@ -1053,6 +1053,11 @@ def project_timeseries(
 
 
 
+@app.options("/api/curves/prediction-bands")
+def prediction_bands_options() -> Response:
+    return Response(status_code=204)
+
+
 @app.get("/api/curves/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
     min_points: int = Query(30),
@@ -1147,3 +1152,18 @@ def prediction_bands(
 
     pred_cache[key] = resp
     return resp
+
+
+@app.get("/api/curves/{iatiidentifier}/prediction-bands", response_model=PredictionBandsResponse)
+def prediction_bands_alias(
+    iatiidentifier: str,
+    min_points: int = Query(30),
+    filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
+    db: Session = Depends(get_db),
+):
+    return prediction_bands(
+        min_points=min_points,
+        iatiidentifier=iatiidentifier,
+        filters_data=filters_data,
+        db=db,
+    )
