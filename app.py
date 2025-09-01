@@ -53,11 +53,11 @@ logger = logging.getLogger(__name__)
 # domains via regex.  Trailing slashes are stripped from configured origins to
 # avoid mismatches with the request ``Origin`` header.
 env_origins = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
-env_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
+env_origin_regex = os.getenv("CORS_ORIGIN_REGEX") or None
 if env_origins:
         allow_origins = env_origins
         # Only apply a regex if explicitly provided and does not contradict the whitelist
-        allow_origin_regex = env_origin_regex
+        allow_origin_regex = env_origin_regex or None
 else:
         allow_origins = ["https://clientcurvasdesembolso-production.up.railway.app"]
         # Default to Railway domains unless overridden via env var
@@ -67,7 +67,8 @@ app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
         allow_origin_regex=allow_origin_regex,
-        allow_credentials=False,
+        # Allow credentials so that the client can send cookies/auth headers if needed.
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=[],
