@@ -1083,8 +1083,19 @@ def prediction_bands(
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
     df_hist = pd.DataFrame(
-        [(str(r[0]), int(r[2]), float(r[3])) for r in rows], columns=["pid", "k", "d"]
-    ).dropna()
+        [
+            (
+                str(r[0]),
+                int(r[2]),
+                float(r[3]),
+                str(r[5]),
+                str(r[7]),
+                str(r[8]),
+            )
+            for r in rows
+        ],
+        columns=["pid", "k", "d", "country", "macrosector", "modality"],
+    ).dropna(subset=["k", "d"])
     df_hist["d"] = df_hist["d"].clip(0.0, 1.0)
     if iatiidentifier:
         df_hist = df_hist[df_hist["pid"] != iatiidentifier]
@@ -1096,20 +1107,28 @@ def prediction_bands(
             detail=f"not enough data points ({len(df_hist)} < {min_points})",
         )
 
-    grouped = df_hist.groupby("k")
-    counts = grouped.size()
+    grouped_comb = (
+        df_hist.groupby(["country", "macrosector", "modality", "k"])["d"]
+        .mean()
+        .reset_index()
+    )
+    pivot = grouped_comb.pivot_table(
+        index="k", columns=["country", "macrosector", "modality"], values="d"
+    )
+    pivot = pivot.dropna(how="all")
+    counts = pivot.count(axis=1)
     try:
-        q = grouped["d"].quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack().dropna()
+        q = pivot.quantile([0.025, 0.10, 0.5, 0.90, 0.975], axis=1).dropna(axis=1)
     except TypeError as e:
         raise HTTPException(status_code=400, detail="unable to compute quantiles") from e
 
-    k_vals = q.index.astype(int).tolist()
+    k_vals = q.columns.astype(int).tolist()
     counts = counts.loc[k_vals].astype(int).to_numpy()
-    p50 = q[0.5].to_numpy(dtype=float)
-    p10 = q[0.10].to_numpy(dtype=float)
-    p90 = q[0.90].to_numpy(dtype=float)
-    p2_5 = q[0.025].to_numpy(dtype=float)
-    p97_5 = q[0.975].to_numpy(dtype=float)
+    p50 = q.loc[0.5].to_numpy(dtype=float)
+    p10 = q.loc[0.10].to_numpy(dtype=float)
+    p90 = q.loc[0.90].to_numpy(dtype=float)
+    p2_5 = q.loc[0.025].to_numpy(dtype=float)
+    p97_5 = q.loc[0.975].to_numpy(dtype=float)
 
     # Enforce non-decreasing by k
     def _fix_series(arr: np.ndarray) -> np.ndarray:
