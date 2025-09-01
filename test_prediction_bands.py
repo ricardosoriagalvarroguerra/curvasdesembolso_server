@@ -80,6 +80,28 @@ def test_prediction_bands_quantiles(monkeypatch):
     assert isinstance(j["alerts"], list)
 
 
+def test_prediction_bands_respects_filters(monkeypatch):
+    def fake_ts(project_id, db=None, yearFrom=2010, yearTo=2024):
+        return _synthetic_series(n=40)
+
+    captured = {}
+
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        captured["filters"] = filters
+        return _synthetic_rows(n_k=40)
+
+    monkeypatch.setattr("app.project_timeseries", fake_ts)
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
+
+    r = client.get(
+        "/api/curves/P1/prediction-bands?macrosectors=22&countries=XX"
+    )
+    assert r.status_code == 200
+    assert captured["filters"].macrosectors == [22]
+    assert captured["filters"].countries == ["XX"]
+
+
 def test_prediction_bands_min_points(monkeypatch):
     def fake_ts(project_id, db=None, yearFrom=2010, yearTo=2024):
         return _synthetic_series()
