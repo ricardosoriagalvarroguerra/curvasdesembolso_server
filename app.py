@@ -1088,12 +1088,18 @@ def prediction_bands(
     if len(rows) < min_points:
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
-    df_hist = (
-        pd.DataFrame([(int(r[2]), float(r[3])) for r in rows], columns=["k", "d"]).dropna()
-    )
+    df_hist = pd.DataFrame(
+        [(int(r[2]), float(r[3])) for r in rows], columns=["k", "d"]
+    ).dropna()
+    if df_hist.empty:
+        raise HTTPException(status_code=400, detail="not enough valid data points")
+
     grouped = df_hist.groupby("k")["d"]
     # Remove k values with incomplete quantiles to avoid NaNs in response
-    q = grouped.quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack().dropna()
+    try:
+        q = grouped.quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack().dropna()
+    except TypeError as e:
+        raise HTTPException(status_code=400, detail="unable to compute quantiles") from e
 
     k_vals = q.index.astype(int).tolist()
     p50 = q[0.5].tolist()
