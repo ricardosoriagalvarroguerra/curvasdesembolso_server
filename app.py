@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 from cachetools import TTLCache
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware as FastAPICORSMiddleware
+from fastapi.responses import JSONResponse, Response
+from starlette.datastructures import Headers
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
@@ -31,6 +32,14 @@ from models import (
 from utils_curve import logistic3, fit_logistic3
 
 
+class CORSMiddleware(FastAPICORSMiddleware):
+        """Custom CORS middleware with 204 preflight responses."""
+
+        def preflight_response(self, request_headers: Headers) -> Response:  # type: ignore[override]
+                resp = super().preflight_response(request_headers)
+                return Response(status_code=204, headers=dict(resp.headers))
+
+
 app = FastAPI(title="Curvas de Desembolso API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
@@ -44,12 +53,15 @@ logger = logging.getLogger(__name__)
 # domains via regex.  Trailing slashes are stripped from configured origins to
 # avoid mismatches with the request ``Origin`` header.
 env_origins = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+env_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if env_origins:
         allow_origins = env_origins
-        allow_origin_regex = None
+        # Only apply a regex if explicitly provided and does not contradict the whitelist
+        allow_origin_regex = env_origin_regex
 else:
         allow_origins = ["https://clientcurvasdesembolso-production.up.railway.app"]
-        allow_origin_regex = r"^https://.*\.railway\.app$"
+        # Default to Railway domains unless overridden via env var
+        allow_origin_regex = env_origin_regex or r"^https://.*\.railway\.app$"
 
 app.add_middleware(
         CORSMiddleware,
@@ -555,11 +567,18 @@ def _sample_indices(n: int, frac: float) -> List[int]:
 
 
 @app.post("/api/curves/fit", response_model=CurveFitResponse)
-def fit_curve(
+async def fit_curve(
         payload: FiltersRequest,
-        start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
+        request: Request,
+        start_from_first_disb: bool | None = Query(None, alias="fromFirstDisbursement"),
         db: Session = Depends(get_db),
 ):
+        if start_from_first_disb is None:
+                try:
+                        body = await request.json()
+                except Exception:
+                        body = {}
+                start_from_first_disb = bool(body.get("fromFirstDisbursement", False))
         key = json.dumps(
                 {"payload": payload.model_dump(), "start_from_first_disb": start_from_first_disb},
                 sort_keys=True,
