@@ -1061,12 +1061,20 @@ def prediction_bands_options() -> Response:
 @app.get("/api/curves/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
     min_points: int = Query(30),
+    min_n_k: int = Query(30),
     iatiidentifier: str | None = Query(None),
+    debug: bool = Query(False),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
     filters, _ = filters_data
-    key = (min_points, iatiidentifier, json.dumps(filters.model_dump(), sort_keys=True))
+    key = (
+        min_points,
+        min_n_k,
+        iatiidentifier,
+        debug,
+        json.dumps(filters.model_dump(), sort_keys=True),
+    )
     if key in pred_cache:
         return pred_cache[key]
 
@@ -1077,6 +1085,7 @@ def prediction_bands(
     df_hist = pd.DataFrame(
         [(str(r[0]), int(r[2]), float(r[3])) for r in rows], columns=["pid", "k", "d"]
     ).dropna()
+    df_hist["d"] = df_hist["d"].clip(0.0, 1.0)
     if iatiidentifier:
         df_hist = df_hist[df_hist["pid"] != iatiidentifier]
     if df_hist.empty:
@@ -1087,22 +1096,23 @@ def prediction_bands(
             detail=f"not enough data points ({len(df_hist)} < {min_points})",
         )
 
-    grouped = df_hist.groupby("k")["d"]
+    grouped = df_hist.groupby("k")
+    counts = grouped.size()
     try:
-        q = grouped.quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack().dropna()
+        q = grouped["d"].quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack().dropna()
     except TypeError as e:
         raise HTTPException(status_code=400, detail="unable to compute quantiles") from e
 
     k_vals = q.index.astype(int).tolist()
+    counts = counts.loc[k_vals].astype(int).to_numpy()
     p50 = q[0.5].to_numpy(dtype=float)
     p10 = q[0.10].to_numpy(dtype=float)
     p90 = q[0.90].to_numpy(dtype=float)
     p2_5 = q[0.025].to_numpy(dtype=float)
     p97_5 = q[0.975].to_numpy(dtype=float)
 
-    # Clip to [0,1] and enforce non-decreasing by k
+    # Enforce non-decreasing by k
     def _fix_series(arr: np.ndarray) -> np.ndarray:
-        arr = np.clip(arr, 0.0, 1.0)
         return np.maximum.accumulate(arr)
 
     p50 = _fix_series(p50)
@@ -1118,6 +1128,7 @@ def prediction_bands(
         p90[i] = max(p90[i], p50[i])
         p97_5[i] = max(p97_5[i], p90[i])
 
+    low_sample_flags = counts < min_n_k
     bands = [
         {
             "k": k,
@@ -1126,12 +1137,15 @@ def prediction_bands(
             "p90": float(hi),
             "p2_5": float(lo2),
             "p97_5": float(hi2),
+            "n": int(n),
+            "low_sample": bool(ls),
         }
-        for k, m, lo, hi, lo2, hi2 in zip(k_vals, p50, p10, p90, p2_5, p97_5)
+        for k, m, lo, hi, lo2, hi2, n, ls in zip(
+            k_vals, p50, p10, p90, p2_5, p97_5, counts, low_sample_flags
+        )
     ]
 
     n_points = int(len(df_hist))
-    low_sample_thresh = int(os.getenv("PRED_LOW_SAMPLE_THRESHOLD", "100"))
     resp = {
         "k": k_vals,
         "p50": p50.tolist(),
@@ -1142,13 +1156,42 @@ def prediction_bands(
         "bands": bands,
         "meta": {
             "method": "historical_quantiles",
-            "level": 0.95,
+            "coverage": {"outer": 0.95, "inner": 0.80},
             "smooth": False,
             "num_points": n_points,
-            "notes": "",
-            "low_sample": n_points < low_sample_thresh,
+            "notes": "n decreases at high k due to cohort truncation",
         },
+        "n": counts.tolist(),
     }
+
+    if iatiidentifier:
+        proj = project_timeseries(
+            iatiidentifier=iatiidentifier,
+            yearFrom=filters.yearFrom,
+            yearTo=filters.yearTo,
+            db=db,
+        )
+        resp["project"] = proj.model_dump()
+
+    if debug:
+        p2_dict = dict(zip(k_vals, p2_5))
+        p97_dict = dict(zip(k_vals, p97_5))
+        p10_dict = dict(zip(k_vals, p10))
+        p90_dict = dict(zip(k_vals, p90))
+        outer_hits = 0
+        inner_hits = 0
+        for _, row in df_hist.iterrows():
+            k = int(row["k"])
+            d = float(row["d"])
+            if k in p2_dict and p2_dict[k] <= d <= p97_dict[k]:
+                outer_hits += 1
+            if k in p10_dict and p10_dict[k] <= d <= p90_dict[k]:
+                inner_hits += 1
+        total = len(df_hist)
+        resp["meta"]["coverage_empirical"] = {
+            "outer": outer_hits / total if total else None,
+            "inner": inner_hits / total if total else None,
+        }
 
     pred_cache[key] = resp
     return resp
@@ -1158,12 +1201,16 @@ def prediction_bands(
 def prediction_bands_alias(
     iatiidentifier: str,
     min_points: int = Query(30),
+    min_n_k: int = Query(30),
+    debug: bool = Query(False),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
     return prediction_bands(
         min_points=min_points,
+        min_n_k=min_n_k,
         iatiidentifier=iatiidentifier,
+        debug=debug,
         filters_data=filters_data,
         db=db,
     )
