@@ -1,16 +1,22 @@
 import numpy as np
+from datetime import date
 from dateutil.relativedelta import relativedelta
 from scipy.optimize import curve_fit
 
 
-def months_between(d1, d2):
-	"""Return integer months between d1 (start) and d2 (end). If d2 < d1, return 0."""
-	if d1 is None or d2 is None:
-		return None
-	if d2 < d1:
-		return 0
-	rd = relativedelta(d2, d1)
-	return rd.years * 12 + rd.months
+def months_between(d1: date | None, d2: date | None) -> int | None:
+        """Return the number of whole months between ``d1`` and ``d2``.
+
+        If either date is ``None`` this function returns ``None``. When the end
+        date precedes the start date, ``0`` is returned.
+        """
+
+        if d1 is None or d2 is None:
+                return None
+        if d2 < d1:
+                return 0
+        rd = relativedelta(d2, d1)
+        return rd.years * 12 + rd.months
 
 
 def logistic3(k, b0, b1, b2):
