@@ -37,8 +37,9 @@ app = FastAPI(title="Curvas de Desembolso API", version="0.1.0")
 # ``CORS_ORIGINS`` may contain a comma separated list of explicit origins and
 # ``CORS_ORIGIN_REGEX`` can be used for pattern based matching (e.g. for Railway).
 # If neither variable is provided we fall back to allowing any origin which keeps
-# the previous behaviour useful for development.
-env_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+# the previous behaviour useful for development.  Trim trailing slashes from
+# configured origins to avoid mismatches with the request ``Origin`` header.
+env_origins = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 allow_origins = env_origins if env_origins else ["*"]
 
 # Allow overriding the regex via env; by default permit localhost and any
@@ -474,6 +475,13 @@ def _run_base_query(
         select_meta: bool = True,
         start_from_first_disb: bool = False,
 ) -> List[Row]:
+        if db is None:
+                # Provide a clearer error when the database is unavailable instead of
+                # crashing with an ``AttributeError`` later when accessing the
+                # session.  Returning a 503 (service unavailable) helps clients and
+                # callers distinguish this scenario from other failures.
+                raise HTTPException(status_code=503, detail="database session unavailable")
+
         cache_key = (
                 json.dumps(filters.model_dump(), sort_keys=True),
                 str(status_target).upper(),
