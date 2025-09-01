@@ -458,12 +458,18 @@ def _bands_from_params(b0: float, b1: float, b2: float, sigma: float, k_max: int
 
 
 def _run_base_query(
-        filters: FiltersRequest, db: Session, status_target: str = 'ALL', *, select_meta: bool = True
+        filters: FiltersRequest,
+        db: Session,
+        status_target: str = 'ALL',
+        *,
+        select_meta: bool = True,
+        start_from_first_disb: bool = False,
 ) -> List[Row]:
         cache_key = (
                 json.dumps(filters.model_dump(), sort_keys=True),
                 str(status_target).upper(),
                 bool(select_meta),
+                bool(start_from_first_disb),
         )
         if cache_key in base_query_cache:
                 return base_query_cache[cache_key]
@@ -494,6 +500,23 @@ def _run_base_query(
                 pass
         res = db.execute(text(sql), params)
         rows = res.fetchall()
+        if start_from_first_disb:
+                adj_rows: List[tuple] = []
+                first_k: dict[str, int] = {}
+                for r in rows:
+                        pid = r[0]
+                        k = int(r[2])
+                        d = float(r[3])
+                        if d <= 0:
+                                continue
+                        if pid not in first_k:
+                                first_k[pid] = k
+                        new_k = k - first_k[pid]
+                        if select_meta:
+                                adj_rows.append((r[0], r[1], new_k, d, r[4], r[5], r[6], r[7], r[8], r[9]))
+                        else:
+                                adj_rows.append((r[0], r[1], new_k, d))
+                rows = adj_rows
         base_query_cache[cache_key] = rows
         return rows
 
@@ -504,13 +527,25 @@ def _sample_indices(n: int, frac: float) -> List[int]:
 
 
 @app.post("/api/curves/fit", response_model=CurveFitResponse)
-def fit_curve(payload: FiltersRequest, db: Session = Depends(get_db)):
-        key = json.dumps(payload.model_dump(), sort_keys=True)
+def fit_curve(
+        payload: FiltersRequest,
+        start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
+        db: Session = Depends(get_db),
+):
+        key = json.dumps(
+                {"payload": payload.model_dump(), "start_from_first_disb": start_from_first_disb},
+                sort_keys=True,
+        )
         if key in cache:
                 return cache[key]
 
         # Rows for current filter context (used for domain/KPIs). Use both ACTIVE & EXITED
-        rows = _run_base_query(payload, db, status_target='ALL')
+        rows = _run_base_query(
+                payload,
+                db,
+                status_target='ALL',
+                start_from_first_disb=start_from_first_disb,
+        )
         if not rows:
                 raise HTTPException(status_code=400, detail="No hay suficientes observaciones para ajustar la curva; afloja filtros")
 
@@ -966,6 +1001,7 @@ def project_timeseries(
         iatiidentifier: str,
         yearFrom: int = Query(2010),
         yearTo: int = Query(2024),
+        start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
         db: Session = Depends(get_db),
 ):
         # Build approved amount and approval date using trans_id codes (no joins)
@@ -1021,6 +1057,7 @@ def project_timeseries(
         series: List[ProjectTimeseriesPoint] = []
         # accumulate
         cum = 0.0
+        first_k: int | None = None
         for (ym, disb_month) in rows:
                 mval = float(disb_month or 0.0)
                 cum += mval
@@ -1034,6 +1071,12 @@ def project_timeseries(
                         age_months = (ym.month - approval_date.month)
                         k = max(0, age_years * 12 + age_months)
                         d = float(min(1.0, cum / approved_amount)) if approved_amount > 0 else 0.0
+                if start_from_first_disb:
+                        if d <= 0:
+                                continue
+                        if first_k is None:
+                                first_k = int(k or 0)
+                        k = (int(k or 0) - first_k)
                 series.append(
                         ProjectTimeseriesPoint(
                                 ym=ym.isoformat(), disb_month=mval, disb_cum_usd=float(cum), k=int(k or 0), d=float(d)
@@ -1064,6 +1107,7 @@ def prediction_bands(
     min_n_k: int = Query(30),
     iatiidentifier: str | None = Query(None),
     debug: bool = Query(False),
+    start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
@@ -1074,11 +1118,18 @@ def prediction_bands(
         iatiidentifier,
         debug,
         json.dumps(filters.model_dump(), sort_keys=True),
+        bool(start_from_first_disb),
     )
     if key in pred_cache:
         return pred_cache[key]
 
-    rows = _run_base_query(filters, db, status_target="ALL", select_meta=False)
+    rows = _run_base_query(
+        filters,
+        db,
+        status_target="ALL",
+        select_meta=False,
+        start_from_first_disb=start_from_first_disb,
+    )
     if len(rows) < min_points:
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
@@ -1188,6 +1239,7 @@ def prediction_bands(
             iatiidentifier=iatiidentifier,
             yearFrom=filters.yearFrom,
             yearTo=filters.yearTo,
+            start_from_first_disb=start_from_first_disb,
             db=db,
         )
         resp["project"] = proj.model_dump()
@@ -1222,6 +1274,7 @@ def prediction_bands_alias(
     min_points: int = Query(30),
     min_n_k: int = Query(30),
     debug: bool = Query(False),
+    start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
@@ -1230,6 +1283,7 @@ def prediction_bands_alias(
         min_n_k=min_n_k,
         iatiidentifier=iatiidentifier,
         debug=debug,
+        start_from_first_disb=start_from_first_disb,
         filters_data=filters_data,
         db=db,
     )
