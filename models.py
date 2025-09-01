@@ -114,13 +114,18 @@ class ProjectTimeseriesResponse(BaseModel):
         series: List[ProjectTimeseriesPoint]
 
 
+class Coverage(BaseModel):
+        outer: Optional[float] = None
+        inner: Optional[float] = None
+
+
 class PredictionMeta(BaseModel):
         method: str
-        level: float
+        coverage: Coverage
         smooth: bool
         num_points: int
         notes: str = ""
-        low_sample: bool | None = None
+        coverage_empirical: Coverage | None = None
 
 
 class EtaMetrics(BaseModel):
@@ -138,6 +143,8 @@ class PredictionBandPoint(BaseModel):
     p90: float
     p2_5: float
     p97_5: float
+    n: int
+    low_sample: bool
 
 
 class PredictionBandsResponse(BaseModel):
@@ -149,7 +156,9 @@ class PredictionBandsResponse(BaseModel):
     p90: List[float]
     p2_5: List[float]
     p97_5: List[float]
+    n: List[int]
     meta: PredictionMeta
     bands: List[PredictionBandPoint] | None = None
+    project: ProjectTimeseriesResponse | None = None
 
 

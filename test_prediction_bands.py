@@ -35,10 +35,11 @@ def test_prediction_bands_quantiles(monkeypatch):
     assert r.status_code == 200
     j = r.json()
     assert j["meta"]["method"] == "historical_quantiles"
-    assert len(j["k"]) == len(j["p50"]) == len(j["p10"]) == len(j["p90"]) == len(j["p2_5"]) == len(j["p97_5"])
+    assert j["meta"]["coverage"]["outer"] == 0.95
+    assert len(j["k"]) == len(j["p50"]) == len(j["p10"]) == len(j["p90"]) == len(j["p2_5"]) == len(j["p97_5"]) == len(j["n"])
     assert len(j["bands"]) == len(j["k"])
-    for bp, k, p50, p10, p90, p2_5, p97_5 in zip(
-        j["bands"], j["k"], j["p50"], j["p10"], j["p90"], j["p2_5"], j["p97_5"],
+    for bp, k, p50, p10, p90, p2_5, p97_5, n in zip(
+        j["bands"], j["k"], j["p50"], j["p10"], j["p90"], j["p2_5"], j["p97_5"], j["n"]
     ):
         assert bp["k"] == k
         assert bp["p50"] == p50
@@ -46,6 +47,8 @@ def test_prediction_bands_quantiles(monkeypatch):
         assert bp["p90"] == p90
         assert bp["p2_5"] == p2_5
         assert bp["p97_5"] == p97_5
+        assert bp["n"] == n
+        assert "low_sample" in bp
 
 
 def test_prediction_bands_respects_filters(monkeypatch):
@@ -88,6 +91,7 @@ def test_prediction_bands_zero_series(monkeypatch):
     assert all(abs(v) < 1e-8 for v in j["p50"])
     assert all(abs(v) < 1e-8 for v in j["p10"]) and all(abs(v) < 1e-8 for v in j["p90"])
     assert all(abs(v) < 1e-8 for v in j["p2_5"]) and all(abs(v) < 1e-8 for v in j["p97_5"])
+    assert len(j["n"]) == len(j["k"])
 
 
 def test_prediction_bands_drop_nan(monkeypatch):
@@ -118,3 +122,20 @@ def test_prediction_bands_drop_nan(monkeypatch):
     for arr in (j["p50"], j["p10"], j["p90"], j["p2_5"], j["p97_5"]):
         assert np.isfinite(arr).all()
     assert 1 not in j["k"]
+    assert len(j["n"]) == len(j["k"])
+
+
+def test_prediction_bands_empirical_coverage(monkeypatch):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        return _synthetic_rows(n_k=20)
+
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
+
+    r = client.get("/api/curves/prediction-bands?debug=true")
+    assert r.status_code == 200
+    j = r.json()
+    assert "coverage_empirical" in j["meta"]
+    ce = j["meta"]["coverage_empirical"]
+    assert 0 <= ce["outer"] <= 1
+    assert 0 <= ce["inner"] <= 1
