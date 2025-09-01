@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import random
@@ -7,7 +8,7 @@ from typing import List, Tuple, Set
 import numpy as np
 import pandas as pd
 from cachetools import TTLCache
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -31,23 +32,24 @@ from utils_curve import logistic3, fit_logistic3
 
 
 app = FastAPI(title="Curvas de Desembolso API", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 # CORS
 # Permit localhost by default and optionally allow additional origins via env vars.
 # ``CORS_ORIGINS`` may contain a comma separated list of explicit origins and
 # ``CORS_ORIGIN_REGEX`` can be used for pattern based matching (e.g. for Railway).
-# If neither variable is provided we fall back to allowing any origin which keeps
-# the previous behaviour useful for development.  Trim trailing slashes from
-# configured origins to avoid mismatches with the request ``Origin`` header.
+# If the ``CORS_ORIGINS`` env var is provided use that explicit whitelist.
+# Otherwise default to the production client origin and allow any ``*.railway.app``
+# domains via regex.  Trailing slashes are stripped from configured origins to
+# avoid mismatches with the request ``Origin`` header.
 env_origins = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
-allow_origins = env_origins if env_origins else ["*"]
-
-# Allow overriding the regex via env; by default permit localhost and any
-# ``*.railway.app`` domains so the hosted client can reach the API without
-# requiring extra configuration.
-default_origin_regex = r"https?://(localhost|127\.0\.0\.1):\d+$|https://.*\.railway\.app$"
-allow_origin_regex = os.getenv("CORS_ORIGIN_REGEX") or default_origin_regex
+if env_origins:
+        allow_origins = env_origins
+        allow_origin_regex = None
+else:
+        allow_origins = ["https://clientcurvasdesembolso-production.up.railway.app"]
+        allow_origin_regex = r"^https://.*\.railway\.app$"
 
 app.add_middleware(
         CORSMiddleware,
@@ -55,8 +57,10 @@ app.add_middleware(
         allow_origin_regex=allow_origin_regex,
         allow_credentials=False,
         allow_methods=["*"],
-        allow_headers=["*"]
+        allow_headers=["*"],
+        expose_headers=[],
 )
+logger.info("Configured CORS: origins=%s regex=%s", allow_origins, allow_origin_regex)
 
 
 @app.exception_handler(Exception)
@@ -67,6 +71,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     are still applied to the response, allowing browsers to receive the error
     details instead of failing with a CORS error.
     """
+    logger.exception("Unhandled error during request", exc_info=exc)
     return JSONResponse(status_code=500, content={"detail": "internal server error"})
 
 
@@ -365,12 +370,6 @@ def root():
 @app.get("/api/health")
 def health():
         return {"status": "ok"}
-
-
-@app.options("/api/filters")
-def options_filters():
-        return Response(status_code=200)
-
 
 @app.get("/api/filters", response_model=FiltersResponse)
 def get_filters(db: Session = Depends(get_db)):
@@ -1019,12 +1018,6 @@ def fit_curve(
         cache[key] = resp
         return resp
 
-
-@app.options("/api/curves/fit")
-def options_curves_fit():
-        return Response(status_code=200)
-
-
 @app.get("/api/projects/{iatiidentifier}/timeseries", response_model=ProjectTimeseriesResponse)
 def project_timeseries(
         iatiidentifier: str,
@@ -1122,13 +1115,6 @@ def project_timeseries(
                 ),
                 series=series,
         )
-
-
-
-@app.options("/api/curves/prediction-bands")
-def prediction_bands_options() -> Response:
-    return Response(status_code=204)
-
 
 @app.get("/api/curves/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
