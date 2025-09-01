@@ -120,6 +120,7 @@ class PredictionMeta(BaseModel):
         smooth: bool
         num_points: int
         notes: str = ""
+        low_sample: bool | None = None
 
 
 class EtaMetrics(BaseModel):

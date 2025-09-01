@@ -1042,11 +1042,12 @@ def project_timeseries(
 @app.get("/api/curves/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
     min_points: int = Query(30),
+    iatiidentifier: str | None = Query(None),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
     filters, _ = filters_data
-    key = (min_points, json.dumps(filters.model_dump(), sort_keys=True))
+    key = (min_points, iatiidentifier, json.dumps(filters.model_dump(), sort_keys=True))
     if key in pred_cache:
         return pred_cache[key]
 
@@ -1054,9 +1055,18 @@ def prediction_bands(
     if len(rows) < min_points:
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
-    df_hist = pd.DataFrame([(int(r[2]), float(r[3])) for r in rows], columns=["k", "d"]).dropna()
+    df_hist = pd.DataFrame(
+        [(str(r[0]), int(r[2]), float(r[3])) for r in rows], columns=["pid", "k", "d"]
+    ).dropna()
+    if iatiidentifier:
+        df_hist = df_hist[df_hist["pid"] != iatiidentifier]
     if df_hist.empty:
         raise HTTPException(status_code=400, detail="not enough valid data points")
+    if len(df_hist) < min_points:
+        raise HTTPException(
+            status_code=400,
+            detail=f"not enough data points ({len(df_hist)} < {min_points})",
+        )
 
     grouped = df_hist.groupby("k")["d"]
     try:
@@ -1065,38 +1075,59 @@ def prediction_bands(
         raise HTTPException(status_code=400, detail="unable to compute quantiles") from e
 
     k_vals = q.index.astype(int).tolist()
-    p50 = q[0.5].tolist()
-    p10 = q[0.10].tolist()
-    p90 = q[0.90].tolist()
-    p2_5 = q[0.025].tolist()
-    p97_5 = q[0.975].tolist()
+    p50 = q[0.5].to_numpy(dtype=float)
+    p10 = q[0.10].to_numpy(dtype=float)
+    p90 = q[0.90].to_numpy(dtype=float)
+    p2_5 = q[0.025].to_numpy(dtype=float)
+    p97_5 = q[0.975].to_numpy(dtype=float)
+
+    # Clip to [0,1] and enforce non-decreasing by k
+    def _fix_series(arr: np.ndarray) -> np.ndarray:
+        arr = np.clip(arr, 0.0, 1.0)
+        return np.maximum.accumulate(arr)
+
+    p50 = _fix_series(p50)
+    p10 = _fix_series(p10)
+    p90 = _fix_series(p90)
+    p2_5 = _fix_series(p2_5)
+    p97_5 = _fix_series(p97_5)
+
+    # Ensure quantile ordering at each k
+    for i in range(len(k_vals)):
+        p10[i] = max(p10[i], p2_5[i])
+        p50[i] = max(p50[i], p10[i])
+        p90[i] = max(p90[i], p50[i])
+        p97_5[i] = max(p97_5[i], p90[i])
 
     bands = [
         {
             "k": k,
-            "p50": m,
-            "p10": lo,
-            "p90": hi,
-            "p2_5": lo2,
-            "p97_5": hi2,
+            "p50": float(m),
+            "p10": float(lo),
+            "p90": float(hi),
+            "p2_5": float(lo2),
+            "p97_5": float(hi2),
         }
         for k, m, lo, hi, lo2, hi2 in zip(k_vals, p50, p10, p90, p2_5, p97_5)
     ]
 
+    n_points = int(len(df_hist))
+    low_sample_thresh = int(os.getenv("PRED_LOW_SAMPLE_THRESHOLD", "100"))
     resp = {
         "k": k_vals,
-        "p50": p50,
-        "p10": p10,
-        "p90": p90,
-        "p2_5": p2_5,
-        "p97_5": p97_5,
+        "p50": p50.tolist(),
+        "p10": p10.tolist(),
+        "p90": p90.tolist(),
+        "p2_5": p2_5.tolist(),
+        "p97_5": p97_5.tolist(),
         "bands": bands,
         "meta": {
             "method": "historical_quantiles",
             "level": 0.95,
             "smooth": False,
-            "num_points": int(len(df_hist)),
+            "num_points": n_points,
             "notes": "",
+            "low_sample": n_points < low_sample_thresh,
         },
     }
 
