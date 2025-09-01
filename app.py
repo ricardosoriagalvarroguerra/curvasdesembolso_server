@@ -125,23 +125,23 @@ def _has_trans_type_table(db: Session) -> bool:
 
 
 def _cte_sql(has_tmap: bool) -> str:
-	# Build the CTE SQL, conditionally including tmap join if available
-	tmap_cte = (
-		"tmap AS ( SELECT trans_id, trans_name FROM public.trans_type ),"
-		if has_tmap
-		else ""
-	)
-	join_tmap = (
-		"LEFT JOIN tmap ON tmap.trans_id::text = t.trans_id::text"
-		if has_tmap
-		else ""
-	)
-	trans_name_expr = (
-		"COALESCE(tmap.trans_name, CASE WHEN t.trans_id::text='100' THEN 'Commitment' WHEN t.trans_id::text='200' THEN 'Disbursement' ELSE 'Other' END)"
-		if has_tmap
-		else "CASE WHEN t.trans_id::text='100' THEN 'Commitment' WHEN t.trans_id::text='200' THEN 'Disbursement' ELSE 'Other' END"
-	)
-	return f"""
+        """Build the SQL CTE, conditionally including ``trans_type`` if available."""
+        tmap_cte = (
+                "tmap AS ( SELECT trans_id, trans_name FROM public.trans_type ),"
+                if has_tmap
+                else ""
+        )
+        join_tmap = (
+                "LEFT JOIN tmap ON tmap.trans_id::text = t.trans_id::text"
+                if has_tmap
+                else ""
+        )
+        trans_name_expr = (
+                "COALESCE(tmap.trans_name, CASE WHEN t.trans_id::text='100' THEN 'Commitment' WHEN t.trans_id::text='200' THEN 'Disbursement' ELSE 'Other' END)"
+                if has_tmap
+                else "CASE WHEN t.trans_id::text='100' THEN 'Commitment' WHEN t.trans_id::text='200' THEN 'Disbursement' ELSE 'Other' END"
+        )
+        return f"""
 WITH exited AS (
   SELECT iatiidentifier, country_id, sector_id, macrosector_id, modality_id,
          approval_date, status
@@ -221,7 +221,7 @@ WHERE (
   (:countries_is_empty) OR (country_id::text = ANY(:countries_txt))
 ) AND approved_amount BETWEEN :ticket_min AND :ticket_max
 ORDER BY iatiidentifier, ym
-""".format(tmap_cte=tmap_cte, join_tmap=join_tmap, trans_name_expr=trans_name_expr)
+"""
 
 
 def _cte_sql_v2(only_last: bool = False, select_meta: bool = True) -> str:
