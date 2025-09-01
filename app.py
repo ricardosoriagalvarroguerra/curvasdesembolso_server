@@ -33,15 +33,24 @@ app = FastAPI(title="Curvas de Desembolso API", version="0.1.0")
 
 
 # CORS
-# Permit both localhost and 127.0.0.1 for Vite dev by default; allow override via env
-# In dev, allow all origins to avoid preflight issues across random Vite ports
-default_origins = ["*"]
+# Permit localhost by default and optionally allow additional origins via env vars.
+# ``CORS_ORIGINS`` may contain a comma separated list of explicit origins and
+# ``CORS_ORIGIN_REGEX`` can be used for pattern based matching (e.g. for Railway).
+# If neither variable is provided we fall back to allowing any origin which keeps
+# the previous behaviour useful for development.
 env_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
-allow_origins = env_origins if env_origins else default_origins
+allow_origins = env_origins if env_origins else ["*"]
+
+# Allow overriding the regex via env; by default permit localhost and any
+# ``*.railway.app`` domains so the hosted client can reach the API without
+# requiring extra configuration.
+default_origin_regex = r"https?://(localhost|127\.0\.0\.1):\d+$|https://.*\.railway\.app$"
+allow_origin_regex = os.getenv("CORS_ORIGIN_REGEX", default_origin_regex)
+
 app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
-        allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+        allow_origin_regex=allow_origin_regex,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"]
