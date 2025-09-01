@@ -19,7 +19,7 @@ def test_health():
 def test_curve_fit_monkeypatch(monkeypatch):
     # Monkeypatch the base query to avoid DB
 
-    def fake_run_base_query(filters, db, status_target='ALL', *, select_meta=True):
+    def fake_run_base_query(filters, db, status_target='ALL', *, select_meta=True, start_from_first_disb=False):
         # Generate synthetic logistic-ish data for multiple projects
         rows = []
         for pid in range(10):
@@ -50,5 +50,35 @@ def test_curve_fit_monkeypatch(monkeypatch):
     assert 'params' in j and 'points' in j and 'bands' in j and 'kDomain' in j
     assert j['params']['n_points'] > 30
     assert j['params']['n_projects'] >= 1
+
+
+def test_curve_fit_from_first_disbursement(monkeypatch):
+    def fake_run_base_query(filters, db, status_target='ALL', *, select_meta=True, start_from_first_disb=False):
+        rows = []
+        for pid in range(10):
+            for k in range(3, 60, 3):
+                d = min(1.0, 0.02 * (k - 2))
+                rows.append((f"P{pid}", None, k, d, 1_000_000.0, 'XX', 0, 11, 111))
+        if start_from_first_disb:
+            rows = [(pid, ym, k-3, d, amt, c, s, m, mod) for (pid, ym, k, d, amt, c, s, m, mod) in rows]
+        return rows
+
+    monkeypatch.setattr('app._run_base_query', fake_run_base_query)
+
+    payload = {
+        "macrosectors": [11,22,33,44,55,66],
+        "modalities": [111,222,333,444],
+        "countries": [],
+        "ticketMin": 0,
+        "ticketMax": 1_000_000_000,
+        "yearFrom": 2015,
+        "yearTo": 2024,
+        "onlyExited": True,
+    }
+    r = client.post('/api/curves/fit?fromFirstDisbursement=true', json=payload)
+    assert r.status_code == 200
+    j = r.json()
+    ks = [p['k'] for p in j['points']]
+    assert 0 in ks
 
 

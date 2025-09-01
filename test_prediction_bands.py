@@ -25,7 +25,7 @@ def _synthetic_rows(n_projects=5, n_k=20, noise=0.02, zeros=False):
 
 
 def test_prediction_bands_quantiles(monkeypatch):
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         return _synthetic_rows(n_k=40)
 
     monkeypatch.setattr("app._run_base_query", fake_run_base_query)
@@ -54,7 +54,7 @@ def test_prediction_bands_quantiles(monkeypatch):
 def test_prediction_bands_respects_filters(monkeypatch):
     captured = {}
 
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         captured["filters"] = filters
         return _synthetic_rows(n_k=40)
 
@@ -68,7 +68,7 @@ def test_prediction_bands_respects_filters(monkeypatch):
 
 
 def test_prediction_bands_min_points(monkeypatch):
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         return _synthetic_rows(n_projects=1, n_k=2)
 
     monkeypatch.setattr("app._run_base_query", fake_run_base_query)
@@ -79,7 +79,7 @@ def test_prediction_bands_min_points(monkeypatch):
 
 
 def test_prediction_bands_zero_series(monkeypatch):
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         return _synthetic_rows(n_projects=5, n_k=10, zeros=True)
 
     monkeypatch.setattr("app._run_base_query", fake_run_base_query)
@@ -95,7 +95,7 @@ def test_prediction_bands_zero_series(monkeypatch):
 
 
 def test_prediction_bands_drop_nan(monkeypatch):
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         return _synthetic_rows(n_projects=5, n_k=10)
 
     def fake_quantile(self, qs, axis=0):
@@ -125,7 +125,7 @@ def test_prediction_bands_drop_nan(monkeypatch):
 
 
 def test_prediction_bands_empirical_coverage(monkeypatch):
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         return _synthetic_rows(n_k=20)
 
     monkeypatch.setattr("app._run_base_query", fake_run_base_query)
@@ -141,7 +141,7 @@ def test_prediction_bands_empirical_coverage(monkeypatch):
 
 
 def test_prediction_bands_per_combination(monkeypatch):
-    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
         rows = []
         for k in range(10):
             d_fast = min(1.0, 0.1 * k + 0.1)
@@ -161,3 +161,23 @@ def test_prediction_bands_per_combination(monkeypatch):
     idx = j["k"].index(5)
     assert j["n"][idx] == 2
     assert j["p50"][idx] > 0.3
+
+
+def test_prediction_bands_from_first_disbursement(monkeypatch):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False, start_from_first_disb=False):
+        rows = []
+        for pid in range(5):
+            for k in range(3, 33):
+                d = min(1.0, 0.05 * (k - 2))
+                rows.append((f"P{pid}", None, k, d, 1_000_000.0, "XX", 0, 11, 111, 2020))
+        if start_from_first_disb:
+            rows = [(pid, ym, k-3, d, amt, c, s, m, mod, yr) for (pid, ym, k, d, amt, c, s, m, mod, yr) in rows]
+        return rows
+
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
+
+    r = client.get("/api/curves/prediction-bands?fromFirstDisbursement=true")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["k"][0] == 0
