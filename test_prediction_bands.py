@@ -2,11 +2,14 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.dirname(__file__))
 import app as app_module
 from app import app
+from models import FiltersRequest
 
 client = TestClient(app)
 
@@ -181,3 +184,20 @@ def test_prediction_bands_from_first_disbursement(monkeypatch):
     assert r.status_code == 200
     j = r.json()
     assert j["k"][0] == 0
+
+
+def test_run_base_query_without_db():
+    filters = FiltersRequest(
+        macrosectors=[],
+        modalities=[111],
+        countries=[],
+        mdbs=[],
+        ticketMin=0.0,
+        ticketMax=1_000_000_000.0,
+        yearFrom=2010,
+        yearTo=2024,
+        onlyExited=True,
+    )
+    with pytest.raises(HTTPException) as exc:
+        app_module._run_base_query(filters, None)
+    assert exc.value.status_code == 503
