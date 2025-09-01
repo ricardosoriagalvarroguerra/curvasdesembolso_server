@@ -98,22 +98,21 @@ def test_prediction_bands_drop_nan(monkeypatch):
     def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
         return _synthetic_rows(n_projects=5, n_k=10)
 
-    def fake_quantile(self, qs):
-        ks = [0, 1, 2]
-        idx = []
-        vals = []
-        for k in ks:
-            for q in qs:
-                idx.append((k, q))
+    def fake_quantile(self, qs, axis=0):
+        ks = list(self.index)
+        rows = []
+        for q in qs:
+            row = []
+            for k in ks:
                 if k == 1 and q == 0.10:
-                    vals.append(np.nan)
+                    row.append(np.nan)
                 else:
-                    vals.append(0.5)
-        index = pd.MultiIndex.from_tuples(idx, names=["k", None])
-        return pd.Series(vals, index=index)
+                    row.append(0.5)
+            rows.append(row)
+        return pd.DataFrame(rows, index=qs, columns=ks)
 
     monkeypatch.setattr("app._run_base_query", fake_run_base_query)
-    monkeypatch.setattr(pd.core.groupby.generic.SeriesGroupBy, "quantile", fake_quantile)
+    monkeypatch.setattr(pd.DataFrame, "quantile", fake_quantile)
     app_module.pred_cache.clear()
 
     r = client.get("/api/curves/prediction-bands")
@@ -139,3 +138,26 @@ def test_prediction_bands_empirical_coverage(monkeypatch):
     ce = j["meta"]["coverage_empirical"]
     assert 0 <= ce["outer"] <= 1
     assert 0 <= ce["inner"] <= 1
+
+
+def test_prediction_bands_per_combination(monkeypatch):
+    def fake_run_base_query(filters, db, status_target="ALL", select_meta=False):
+        rows = []
+        for k in range(10):
+            d_fast = min(1.0, 0.1 * k + 0.1)
+            rows.append(("F0", None, k, d_fast, 1_000_000.0, "F", 0, 11, 111, 2020))
+        for pid in range(9):
+            for k in range(10):
+                d_slow = min(1.0, 0.05 * k)
+                rows.append((f"S{pid}", None, k, d_slow, 1_000_000.0, "S", 0, 11, 111, 2020))
+        return rows
+
+    monkeypatch.setattr("app._run_base_query", fake_run_base_query)
+    app_module.pred_cache.clear()
+
+    r = client.get("/api/curves/prediction-bands")
+    assert r.status_code == 200
+    j = r.json()
+    idx = j["k"].index(5)
+    assert j["n"][idx] == 2
+    assert j["p50"][idx] > 0.3
