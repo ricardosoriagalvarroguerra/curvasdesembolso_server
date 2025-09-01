@@ -3,7 +3,7 @@ import math
 import os
 import random
 from datetime import date
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 
 import numpy as np
 import pandas as pd
@@ -56,6 +56,40 @@ cache = TTLCache(maxsize=128, ttl=int(os.getenv("CACHE_TTL_SECONDS", "180")))
 filters_cache = TTLCache(maxsize=8, ttl=int(os.getenv("FILTERS_CACHE_TTL_SECONDS", "600")))
 ts_cache = TTLCache(maxsize=512, ttl=int(os.getenv("TS_CACHE_TTL_SECONDS", "600")))
 pred_cache = TTLCache(maxsize=256, ttl=int(os.getenv("PRED_CACHE_TTL_SECONDS", "300")))
+
+
+def _filters_dep(
+    macrosectors: List[int] | None = Query(None),
+    modalities: List[int] | None = Query(None),
+    countries: List[str] | None = Query(None),
+    mdbs: List[str] | None = Query(None),
+    ticketMin: float = Query(0.0),
+    ticketMax: float = Query(1_000_000_000.0),
+    yearFrom: int = Query(2010),
+    yearTo: int = Query(2024),
+    onlyExited: bool = Query(True),
+) -> Tuple[FiltersRequest, Set[str]]:
+    fields_set: Set[str] = set()
+    if macrosectors is not None:
+        fields_set.add("macrosectors")
+    if modalities is not None:
+        fields_set.add("modalities")
+    if countries is not None:
+        fields_set.add("countries")
+    if mdbs is not None:
+        fields_set.add("mdbs")
+    filters = FiltersRequest(
+        macrosectors=macrosectors or [11, 22, 33, 44, 55, 66],
+        modalities=modalities or [111, 222, 333, 444],
+        countries=countries or [],
+        mdbs=mdbs or [],
+        ticketMin=ticketMin,
+        ticketMax=ticketMax,
+        yearFrom=yearFrom,
+        yearTo=yearTo,
+        onlyExited=onlyExited,
+    )
+    return filters, fields_set
 
 
 MACROSECTOR_LABELS = {
@@ -1009,28 +1043,48 @@ def project_timeseries(
 def prediction_bands(
     project_id: str,
     min_points: int = Query(30),
+    filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
-    key = (project_id, min_points)
-    if key in pred_cache:
-        return pred_cache[key]
-
+    filters, provided = filters_data
     ts_resp = project_timeseries(project_id, db=db)
     proj_k = [p.k for p in ts_resp.series]
     proj_y = [p.d for p in ts_resp.series]
 
-    filters = FiltersRequest(
-        macrosectors=[ts_resp.project.macrosector_id] if ts_resp.project.macrosector_id else [11, 22, 33, 44, 55, 66],
-        modalities=[ts_resp.project.modality_id] if ts_resp.project.modality_id else [111, 222, 333, 444],
-        countries=[ts_resp.project.country_id] if ts_resp.project.country_id else [],
-        ticketMin=0.0,
-        ticketMax=1_000_000_000.0,
-        yearFrom=2010,
-        yearTo=2024,
-        onlyExited=True,
+    # Merge provided filters with project defaults for context
+    macros = (
+        filters.macrosectors
+        if "macrosectors" in provided
+        else ([ts_resp.project.macrosector_id] if ts_resp.project.macrosector_id else [11, 22, 33, 44, 55, 66])
+    )
+    modalities = (
+        filters.modalities
+        if "modalities" in provided
+        else ([ts_resp.project.modality_id] if ts_resp.project.modality_id else [111, 222, 333, 444])
+    )
+    countries = (
+        filters.countries
+        if "countries" in provided
+        else ([ts_resp.project.country_id] if ts_resp.project.country_id else [])
+    )
+    filters_final = FiltersRequest(
+        macrosectors=macros,
+        modalities=modalities,
+        countries=countries,
+        mdbs=filters.mdbs,
+        ticketMin=filters.ticketMin,
+        ticketMax=filters.ticketMax,
+        yearFrom=filters.yearFrom,
+        yearTo=filters.yearTo,
+        onlyExited=filters.onlyExited,
     )
 
-    rows = _run_base_query(filters, db, status_target="ALL", select_meta=False)
+    # Update cache key with merged filters to ensure dynamic recalculation
+    key = (project_id, min_points, json.dumps(filters_final.model_dump(), sort_keys=True))
+    if key in pred_cache:
+        return pred_cache[key]
+
+    rows = _run_base_query(filters_final, db, status_target="ALL", select_meta=False)
     if len(rows) < min_points:
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
