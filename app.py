@@ -45,7 +45,7 @@ allow_origins = env_origins if env_origins else ["*"]
 # ``*.railway.app`` domains so the hosted client can reach the API without
 # requiring extra configuration.
 default_origin_regex = r"https?://(localhost|127\.0\.0\.1):\d+$|https://.*\.railway\.app$"
-allow_origin_regex = os.getenv("CORS_ORIGIN_REGEX", default_origin_regex)
+allow_origin_regex = os.getenv("CORS_ORIGIN_REGEX") or default_origin_regex
 
 app.add_middleware(
         CORSMiddleware,
