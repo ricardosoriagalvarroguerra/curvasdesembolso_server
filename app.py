@@ -7,8 +7,9 @@ from typing import List, Tuple, Set
 import numpy as np
 import pandas as pd
 from cachetools import TTLCache
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
@@ -56,6 +57,17 @@ app.add_middleware(
         allow_methods=["*"],
         allow_headers=["*"]
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Return a generic 500 response for unexpected errors.
+
+    By handling exceptions at the application level we ensure that CORS headers
+    are still applied to the response, allowing browsers to receive the error
+    details instead of failing with a CORS error.
+    """
+    return JSONResponse(status_code=500, content={"detail": "internal server error"})
 
 
 # Simple in-memory caches with TTL
