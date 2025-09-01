@@ -140,18 +140,14 @@ class PredictionBandPoint(BaseModel):
 
 
 class PredictionBandsResponse(BaseModel):
-    project_id: str
+    """Prediction bands for the historical disbursement curve."""
+
     k: List[int]
     p50: List[float]
     p10: List[float]
     p90: List[float]
     p2_5: List[float]
     p97_5: List[float]
-    project_k: List[int]
-    project_y: List[float]
-    current_percentile: Optional[float] = None
-    eta: EtaMetrics = Field(default_factory=EtaMetrics)
-    alerts: List[str] = Field(default_factory=list)
     meta: PredictionMeta
     bands: List[PredictionBandPoint] | None = None
 

@@ -1039,63 +1039,26 @@ def project_timeseries(
 
 
 
-@app.get("/api/curves/{project_id}/prediction-bands", response_model=PredictionBandsResponse)
+@app.get("/api/curves/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
-    project_id: str,
     min_points: int = Query(30),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
-    filters, provided = filters_data
-    ts_resp = project_timeseries(project_id, db=db)
-    proj_k = [p.k for p in ts_resp.series]
-    proj_y = [p.d for p in ts_resp.series]
-
-    # Merge provided filters with project defaults for context
-    macros = (
-        filters.macrosectors
-        if "macrosectors" in provided
-        else ([ts_resp.project.macrosector_id] if ts_resp.project.macrosector_id else [11, 22, 33, 44, 55, 66])
-    )
-    modalities = (
-        filters.modalities
-        if "modalities" in provided
-        else ([ts_resp.project.modality_id] if ts_resp.project.modality_id else [111, 222, 333, 444])
-    )
-    countries = (
-        filters.countries
-        if "countries" in provided
-        else ([ts_resp.project.country_id] if ts_resp.project.country_id else [])
-    )
-    filters_final = FiltersRequest(
-        macrosectors=macros,
-        modalities=modalities,
-        countries=countries,
-        mdbs=filters.mdbs,
-        ticketMin=filters.ticketMin,
-        ticketMax=filters.ticketMax,
-        yearFrom=filters.yearFrom,
-        yearTo=filters.yearTo,
-        onlyExited=filters.onlyExited,
-    )
-
-    # Update cache key with merged filters to ensure dynamic recalculation
-    key = (project_id, min_points, json.dumps(filters_final.model_dump(), sort_keys=True))
+    filters, _ = filters_data
+    key = (min_points, json.dumps(filters.model_dump(), sort_keys=True))
     if key in pred_cache:
         return pred_cache[key]
 
-    rows = _run_base_query(filters_final, db, status_target="ALL", select_meta=False)
+    rows = _run_base_query(filters, db, status_target="ALL", select_meta=False)
     if len(rows) < min_points:
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
-    df_hist = pd.DataFrame(
-        [(int(r[2]), float(r[3])) for r in rows], columns=["k", "d"]
-    ).dropna()
+    df_hist = pd.DataFrame([(int(r[2]), float(r[3])) for r in rows], columns=["k", "d"]).dropna()
     if df_hist.empty:
         raise HTTPException(status_code=400, detail="not enough valid data points")
 
     grouped = df_hist.groupby("k")["d"]
-    # Remove k values with incomplete quantiles to avoid NaNs in response
     try:
         q = grouped.quantile([0.025, 0.10, 0.5, 0.90, 0.975]).unstack().dropna()
     except TypeError as e:
@@ -1120,50 +1083,7 @@ def prediction_bands(
         for k, m, lo, hi, lo2, hi2 in zip(k_vals, p50, p10, p90, p2_5, p97_5)
     ]
 
-    # Percentile of latest project point within cohort distribution
-    current_percentile = None
-    if proj_k:
-        k_star = proj_k[-1]
-        d_star = proj_y[-1]
-        cohort_vals = df_hist[df_hist["k"] == k_star]["d"]
-        if len(cohort_vals) > 0:
-            current_percentile = float((cohort_vals <= d_star).sum() / len(cohort_vals))
-
-    # Estimate months to reach 95% for median and P10-P90 trajectories
-    def _first_k_ge(curve: List[float], threshold: float = 0.95) -> float | None:
-        for kk, val in zip(k_vals, curve):
-            if val >= threshold:
-                return float(kk)
-        return None
-
-    eta_median = _first_k_ge(p50)
-    eta_p10 = _first_k_ge(p90)  # Fast (top performers)
-    eta_p90 = _first_k_ge(p10)  # Slow (laggards)
-
-    # Alerts based on project performance vs bands
-    p10_map = {k: v for k, v in zip(k_vals, p10)}
-    p90_map = {k: v for k, v in zip(k_vals, p90)}
-    consecutive_under = 0
-    alert_under_p10 = False
-    alert_crossed_p90 = False
-    for k, d in zip(proj_k, proj_y):
-        if k in p10_map and d < p10_map[k]:
-            consecutive_under += 1
-            if consecutive_under >= 3:
-                alert_under_p10 = True
-        else:
-            consecutive_under = 0
-        if k in p90_map and d > p90_map[k]:
-            alert_crossed_p90 = True
-
-    alerts: List[str] = []
-    if alert_under_p10:
-        alerts.append("below_p10_3_months")
-    if alert_crossed_p90:
-        alerts.append("above_p90")
-
     resp = {
-        "project_id": project_id,
         "k": k_vals,
         "p50": p50,
         "p10": p10,
@@ -1171,11 +1091,6 @@ def prediction_bands(
         "p2_5": p2_5,
         "p97_5": p97_5,
         "bands": bands,
-        "project_k": proj_k,
-        "project_y": proj_y,
-        "current_percentile": current_percentile,
-        "eta": {"median": eta_median, "p10": eta_p10, "p90": eta_p90},
-        "alerts": alerts,
         "meta": {
             "method": "historical_quantiles",
             "level": 0.95,
