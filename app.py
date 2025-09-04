@@ -1162,26 +1162,34 @@ def prediction_bands(
         filters,
         db,
         status_target="ALL",
-        select_meta=False,
+        select_meta=True,
         start_from_first_disb=start_from_first_disb,
     )
+    if not rows:
+        raise HTTPException(status_code=400, detail="not enough valid data points")
     if len(rows) < min_points:
         raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
 
-    df_hist = pd.DataFrame(
-        [
-            (
-                str(r[0]),
-                int(r[2]),
-                float(r[3]),
-                str(r[5]),
-                str(r[7]),
-                str(r[8]),
-            )
-            for r in rows
-        ],
-        columns=["pid", "k", "d", "country", "macrosector", "modality"],
-    ).dropna(subset=["k", "d"])
+    try:
+        df_hist = pd.DataFrame(
+            [
+                (
+                    str(r[0]),
+                    int(r[2]),
+                    float(r[3]),
+                    str(r[5]),
+                    str(r[7]),
+                    str(r[8]),
+                )
+                for r in rows
+            ],
+            columns=["pid", "k", "d", "country", "macrosector", "modality"],
+        ).dropna(subset=["k", "d"])
+    except IndexError:
+        raise HTTPException(
+            status_code=500,
+            detail="prediction bands require select_meta=True; received rows without meta columns",
+        )
     df_hist["d"] = df_hist["d"].clip(0.0, 1.0)
     if iatiidentifier:
         df_hist = df_hist[df_hist["pid"] != iatiidentifier]
