@@ -25,11 +25,14 @@ from models import (
         FiltersRequest,
         FiltersResponse,
         PredictionBandsResponse,
+        PredictionMeta,
+        CoverageInfo,
         ProjectInfo,
         ProjectTimeseriesPoint,
         ProjectTimeseriesResponse,
 )
 from utils_curve import logistic3, fit_logistic3
+from scipy.stats import norm
 
 
 class CORSMiddleware(FastAPICORSMiddleware):
@@ -1138,18 +1141,38 @@ def project_timeseries(
 
 @app.get("/api/curves/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands(
+    level: float = Query(0.8, ge=0.5, le=0.99),
+    min_n: int = Query(30),
     min_points: int = Query(30),
-    min_n_k: int = Query(30),
+    method: str = Query("historical"),
     iatiidentifier: str | None = Query(None),
     debug: bool = Query(False),
     start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
-    filters, _ = filters_data
+    filters, fields_set = filters_data
+    # Derive cohort from project if no explicit filters provided
+    if iatiidentifier and not fields_set:
+        info = db.execute(
+            text(
+                "SELECT country_id, macrosector_id, modality_id FROM public.activities WHERE iatiidentifier=:pid LIMIT 1"
+            ),
+            {"pid": iatiidentifier},
+        ).fetchone()
+        if info:
+            if info[0]:
+                filters.countries = [str(info[0])]
+            if info[1]:
+                filters.macrosectors = [int(info[1])]
+            if info[2]:
+                filters.modalities = [int(info[2])]
+
     key = (
+        level,
+        min_n,
         min_points,
-        min_n_k,
+        method,
         iatiidentifier,
         debug,
         json.dumps(filters.model_dump(), sort_keys=True),
@@ -1166,9 +1189,20 @@ def prediction_bands(
         start_from_first_disb=start_from_first_disb,
     )
     if not rows:
-        raise HTTPException(status_code=400, detail="not enough valid data points")
-    if len(rows) < min_points:
-        raise HTTPException(status_code=400, detail=f"not enough data points ({len(rows)} < {min_points})")
+        meta = PredictionMeta(
+            method=method,
+            level=level,
+            min_n=min_n,
+            coverage=CoverageInfo(),
+            cohort_filters=filters.model_dump(),
+            baseline_used="cohort",
+            sample_sizes={"projects": 0, "points": 0},
+            reliability="low",
+            warning="cohort empty",
+        )
+        resp = {"k": [], "p50": [], "p_low": [], "p_high": [], "n": [], "meta": meta}
+        pred_cache[key] = resp
+        return resp
 
     try:
         df_hist = pd.DataFrame(
@@ -1193,88 +1227,159 @@ def prediction_bands(
     df_hist["d"] = df_hist["d"].clip(0.0, 1.0)
     if iatiidentifier:
         df_hist = df_hist[df_hist["pid"] != iatiidentifier]
-    if df_hist.empty:
-        raise HTTPException(status_code=400, detail="not enough valid data points")
-    if len(df_hist) < min_points:
-        raise HTTPException(
-            status_code=400,
-            detail=f"not enough data points ({len(df_hist)} < {min_points})",
+
+    n_projects = int(df_hist["pid"].nunique())
+    n_points_total = int(len(df_hist))
+    if df_hist.empty or n_points_total < min_points:
+        meta = PredictionMeta(
+            method=method,
+            level=level,
+            min_n=min_n,
+            coverage=CoverageInfo(),
+            cohort_filters=filters.model_dump(),
+            baseline_used="cohort",
+            sample_sizes={"projects": n_projects, "points": n_points_total},
+            reliability="low",
+            warning="not enough data points",
         )
+        resp = {"k": [], "p50": [], "p_low": [], "p_high": [], "n": [], "meta": meta}
+        pred_cache[key] = resp
+        return resp
+
+    level_warn = False
+    if level > 0.9 and n_projects < min_n:
+        level = 0.8
+        level_warn = True
 
     grouped_comb = (
-        df_hist.groupby(["country", "macrosector", "modality", "k"])["d"]
-        .mean()
-        .reset_index()
+        df_hist.groupby(["country", "macrosector", "modality", "k"])["d"].mean().reset_index()
     )
     pivot = grouped_comb.pivot_table(
         index="k", columns=["country", "macrosector", "modality"], values="d"
     )
     pivot = pivot.dropna(how="all")
-    counts = pivot.count(axis=1)
-    try:
-        q = pivot.quantile([0.025, 0.10, 0.5, 0.90, 0.975], axis=1).dropna(axis=1)
-    except TypeError as e:
-        raise HTTPException(status_code=400, detail="unable to compute quantiles") from e
+    counts_series = pivot.count(axis=1)
 
-    k_vals = q.columns.astype(int).tolist()
-    counts = counts.loc[k_vals].astype(int).to_numpy()
-    p50 = q.loc[0.5].to_numpy(dtype=float)
-    p10 = q.loc[0.10].to_numpy(dtype=float)
-    p90 = q.loc[0.90].to_numpy(dtype=float)
-    p2_5 = q.loc[0.025].to_numpy(dtype=float)
-    p97_5 = q.loc[0.975].to_numpy(dtype=float)
+    if method == "historical":
+        q_low = (1.0 - level) / 2.0
+        q_high = 1.0 - q_low
+        try:
+            q = pivot.quantile([q_low, 0.5, q_high], axis=1).dropna(axis=1)
+        except TypeError as e:
+            raise HTTPException(status_code=400, detail="unable to compute quantiles") from e
+        k_all = q.columns.astype(int)
+        counts = counts_series.loc[k_all].astype(int).to_numpy()
+        p50 = q.loc[0.5].to_numpy(dtype=float)
+        p_low = q.loc[q_low].to_numpy(dtype=float)
+        p_high = q.loc[q_high].to_numpy(dtype=float)
 
-    # Enforce non-decreasing by k
-    def _fix_series(arr: np.ndarray) -> np.ndarray:
-        return np.maximum.accumulate(arr)
+        def _fix_series(arr: np.ndarray) -> np.ndarray:
+            return np.maximum.accumulate(arr)
 
-    p50 = _fix_series(p50)
-    p10 = _fix_series(p10)
-    p90 = _fix_series(p90)
-    p2_5 = _fix_series(p2_5)
-    p97_5 = _fix_series(p97_5)
+        p50 = _fix_series(p50)
+        p_low = _fix_series(p_low)
+        p_high = _fix_series(p_high)
+    elif method == "logistic":
+        median_series = pivot.quantile(0.5, axis=1).dropna()
+        k_all = median_series.index.astype(int)
+        counts = counts_series.loc[k_all].astype(int).to_numpy()
+        p50 = median_series.to_numpy(dtype=float)
 
-    # Ensure quantile ordering at each k
-    for i in range(len(k_vals)):
-        p10[i] = max(p10[i], p2_5[i])
-        p50[i] = max(p50[i], p10[i])
-        p90[i] = max(p90[i], p50[i])
-        p97_5[i] = max(p97_5[i], p90[i])
+        def _fix_series(arr: np.ndarray) -> np.ndarray:
+            return np.maximum.accumulate(arr)
 
-    low_sample_flags = counts < min_n_k
-    bands = [
-        {
-            "k": k,
-            "p50": float(m),
-            "p10": float(lo),
-            "p90": float(hi),
-            "p2_5": float(lo2),
-            "p97_5": float(hi2),
-            "n": int(n),
-            "low_sample": bool(ls),
-        }
-        for k, m, lo, hi, lo2, hi2, n, ls in zip(
-            k_vals, p50, p10, p90, p2_5, p97_5, counts, low_sample_flags
+        p50 = _fix_series(p50)
+        try:
+            b0, b1, b2, sigma = fit_logistic3(k_all, p50)
+        except ValueError:
+            meta = PredictionMeta(
+                method=method,
+                level=level,
+                min_n=min_n,
+                coverage=CoverageInfo(),
+                cohort_filters=filters.model_dump(),
+                baseline_used="cohort",
+                sample_sizes={"projects": n_projects, "points": n_points_total},
+                reliability="low",
+                warning="unable to fit logistic3",
+            )
+            resp = {"k": [], "p50": [], "p_low": [], "p_high": [], "n": [], "meta": meta}
+            pred_cache[key] = resp
+            return resp
+        z = norm.ppf(0.5 + level / 2.0)
+        pred = logistic3(np.array(k_all, dtype=float), b0, b1, b2)
+        p_low = np.clip(pred - z * sigma, 0.0, 1.0)
+        p_high = np.clip(pred + z * sigma, 0.0, 1.0)
+    else:
+        raise HTTPException(status_code=400, detail="invalid method")
+
+    mask = counts >= min_n
+    k_vals = k_all[mask].tolist()
+    p50 = p50[mask]
+    p_low = p_low[mask]
+    p_high = p_high[mask]
+    counts_filtered = counts[mask]
+
+    if not k_vals:
+        warn_msg = "no k with sufficient coverage"
+        if level_warn:
+            warn_msg += "; level adjusted to 0.8"
+        meta = PredictionMeta(
+            method=method,
+            level=level,
+            min_n=min_n,
+            coverage=CoverageInfo(),
+            cohort_filters=filters.model_dump(),
+            baseline_used="cohort",
+            sample_sizes={"projects": n_projects, "points": n_points_total},
+            reliability="low",
+            warning=warn_msg,
         )
-    ]
+        resp = {"k": [], "p50": [], "p_low": [], "p_high": [], "n": [], "meta": meta}
+        pred_cache[key] = resp
+        return resp
 
-    n_points = int(len(df_hist))
+    coverage = CoverageInfo(
+        k_min=int(k_vals[0]) if k_vals else None,
+        k_max=int(k_vals[-1]) if k_vals else None,
+        n=counts_filtered.astype(int).tolist(),
+    )
+
+    warning = None
+    if coverage.k_max is not None and coverage.k_max < 100:
+        warning = "coverage ends before 100 months"
+
+    sample_sizes = {"projects": n_projects, "points": n_points_total}
+    reliability = "high" if n_projects >= min_n else "low"
+    if reliability == "low":
+        warning = (warning + "; " if warning else "") + "small cohort"
+    if level_warn:
+        warning = (warning + "; " if warning else "") + "level adjusted to 0.8"
+
+    params = None
+    if method == "logistic":
+        params = CurveParams(b0=b0, b1=b1, b2=b2, sigma=sigma, n_points=n_points_total, n_projects=n_projects)
+
+    meta = PredictionMeta(
+        method=method,
+        level=level,
+        min_n=min_n,
+        coverage=coverage,
+        params=params,
+        cohort_filters=filters.model_dump(),
+        baseline_used="cohort",
+        sample_sizes=sample_sizes,
+        reliability=reliability,
+        warning=warning,
+    )
+
     resp = {
         "k": k_vals,
         "p50": p50.tolist(),
-        "p10": p10.tolist(),
-        "p90": p90.tolist(),
-        "p2_5": p2_5.tolist(),
-        "p97_5": p97_5.tolist(),
-        "bands": bands,
-        "meta": {
-            "method": "historical_quantiles",
-            "coverage": {"outer": 0.95, "inner": 0.80},
-            "smooth": False,
-            "num_points": n_points,
-            "notes": "n decreases at high k due to cohort truncation",
-        },
-        "n": counts.tolist(),
+        "p_low": p_low.tolist(),
+        "p_high": p_high.tolist(),
+        "n": counts_filtered.astype(int).tolist(),
+        "meta": meta,
     }
 
     if iatiidentifier:
@@ -1287,26 +1392,6 @@ def prediction_bands(
         )
         resp["project"] = proj.model_dump()
 
-    if debug:
-        p2_dict = dict(zip(k_vals, p2_5))
-        p97_dict = dict(zip(k_vals, p97_5))
-        p10_dict = dict(zip(k_vals, p10))
-        p90_dict = dict(zip(k_vals, p90))
-        outer_hits = 0
-        inner_hits = 0
-        for _, row in df_hist.iterrows():
-            k = int(row["k"])
-            d = float(row["d"])
-            if k in p2_dict and p2_dict[k] <= d <= p97_dict[k]:
-                outer_hits += 1
-            if k in p10_dict and p10_dict[k] <= d <= p90_dict[k]:
-                inner_hits += 1
-        total = len(df_hist)
-        resp["meta"]["coverage_empirical"] = {
-            "outer": outer_hits / total if total else None,
-            "inner": inner_hits / total if total else None,
-        }
-
     pred_cache[key] = resp
     return resp
 
@@ -1314,16 +1399,20 @@ def prediction_bands(
 @app.get("/api/curves/{iatiidentifier}/prediction-bands", response_model=PredictionBandsResponse)
 def prediction_bands_alias(
     iatiidentifier: str,
+    level: float = Query(0.8, ge=0.5, le=0.99),
+    min_n: int = Query(30),
     min_points: int = Query(30),
-    min_n_k: int = Query(30),
+    method: str = Query("historical"),
     debug: bool = Query(False),
     start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
     filters_data: Tuple[FiltersRequest, Set[str]] = Depends(_filters_dep),
     db: Session = Depends(get_db),
 ):
     return prediction_bands(
+        level=level,
+        min_n=min_n,
         min_points=min_points,
-        min_n_k=min_n_k,
+        method=method,
         iatiidentifier=iatiidentifier,
         debug=debug,
         start_from_first_disb=start_from_first_disb,

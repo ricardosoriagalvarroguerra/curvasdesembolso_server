@@ -114,18 +114,27 @@ class ProjectTimeseriesResponse(BaseModel):
         series: List[ProjectTimeseriesPoint]
 
 
-class Coverage(BaseModel):
-        outer: Optional[float] = None
-        inner: Optional[float] = None
+class CoverageInfo(BaseModel):
+        """Information about cohort coverage across k."""
+
+        k_min: Optional[int] = None
+        k_max: Optional[int] = None
+        n: List[int] = Field(default_factory=list)
 
 
 class PredictionMeta(BaseModel):
+        """Metadata accompanying the prediction bands response."""
+
         method: str
-        coverage: Coverage
-        smooth: bool
-        num_points: int
-        notes: str = ""
-        coverage_empirical: Coverage | None = None
+        level: float
+        min_n: int
+        coverage: CoverageInfo
+        params: CurveParams | None = None
+        cohort_filters: dict | None = None
+        baseline_used: Optional[str] = None
+        sample_sizes: dict | None = None
+        reliability: Optional[str] = None
+        warning: Optional[str] = None
 
 
 class EtaMetrics(BaseModel):
@@ -139,12 +148,9 @@ class PredictionBandPoint(BaseModel):
 
     k: int
     p50: float
-    p10: float
-    p90: float
-    p2_5: float
-    p97_5: float
+    p_low: float
+    p_high: float
     n: int
-    low_sample: bool
 
 
 class PredictionBandsResponse(BaseModel):
@@ -152,10 +158,8 @@ class PredictionBandsResponse(BaseModel):
 
     k: List[int]
     p50: List[float]
-    p10: List[float]
-    p90: List[float]
-    p2_5: List[float]
-    p97_5: List[float]
+    p_low: List[float]
+    p_high: List[float]
     n: List[int]
     meta: PredictionMeta
     bands: List[PredictionBandPoint] | None = None
