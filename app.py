@@ -628,6 +628,7 @@ async def fit_curve(
         payload: FiltersRequest,
         request: Request,
         start_from_first_disb: bool | None = Query(None, alias="fromFirstDisbursement"),
+        band_coverage_q: float | None = Query(None, alias="bandCoverage"),
         db: Session = Depends(get_db),
 ):
         try:
@@ -636,7 +637,7 @@ async def fit_curve(
                 body = {}
         if start_from_first_disb is None:
                 start_from_first_disb = bool(body.get("fromFirstDisbursement", False))
-        band_coverage = body.get("bandCoverage")
+        band_coverage = band_coverage_q if band_coverage_q is not None else body.get("bandCoverage")
         if band_coverage is not None:
                 try:
                         band_coverage = float(band_coverage)
