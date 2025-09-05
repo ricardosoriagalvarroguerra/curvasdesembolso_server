@@ -75,11 +75,12 @@ class CurveParams(BaseModel):
 
 
 class CurveFitResponse(BaseModel):
-	params: CurveParams
-	points: List[CurvePoint]
-	bands: List[CurveBand]
-	kDomain: Tuple[int, int]
-	activePoints: List[CurvePoint] | None = None
+        params: CurveParams
+        points: List[CurvePoint]
+        bands: List[CurveBand]
+        kDomain: Tuple[int, int]
+        activePoints: List[CurvePoint] | None = None
+        bandsQuantile: List[CurveBand] | None = None
 
 
 class FiltersResponse(BaseModel):
