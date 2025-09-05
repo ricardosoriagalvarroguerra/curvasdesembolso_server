@@ -488,6 +488,65 @@ def _bands_from_params(b0: float, b1: float, b2: float, sigma: float, k_max: int
         return bands
 
 
+def _bands_from_quantiles(
+        points: List[Tuple[str, int, float]],
+        b0: float,
+        b1: float,
+        b2: float,
+        sigma: float,
+        k_max: int,
+        coverage: float,
+) -> List[CurveBand]:
+        if not points or k_max <= 0:
+                return []
+
+        bin_w = max(1, round(k_max / 40))
+        q_low = (1.0 - coverage) / 2.0
+        q_high = 1.0 - q_low
+        z_lookup = {
+                0.8: 1.2815515655446004,
+                0.9: 1.6448536269514722,
+                0.95: 1.959963984540054,
+        }
+        delta_fallback = z_lookup.get(coverage, 1.2815515655446004) * sigma
+
+        # Optional sampling for very large datasets
+        max_pts = int(os.getenv("QUANTILE_SAMPLE_MAX", "50000"))
+        pts = points
+        n_pts = len(points)
+        if n_pts > max_pts:
+                frac = max_pts / n_pts
+                idx = _sample_indices(n_pts, frac)
+                pts = [points[i] for i in idx]
+
+        bins: dict[int, List[float]] = {}
+        for _, k, d in pts:
+                hd = float(logistic3(k, b0, b1, b2))
+                y = float(d - hd)
+                bk = (k // bin_w) * bin_w
+                bins.setdefault(bk, []).append(y)
+
+        q_by_bin: dict[int, Tuple[float, float]] = {}
+        for bk, vals in bins.items():
+                if len(vals) >= 3:
+                        ql = float(np.quantile(vals, q_low))
+                        qh = float(np.quantile(vals, q_high))
+                else:
+                        ql = -delta_fallback
+                        qh = delta_fallback
+                q_by_bin[bk] = (ql, qh)
+
+        bands: List[CurveBand] = []
+        for k in range(0, k_max + 1):
+                hd = float(logistic3(k, b0, b1, b2))
+                bk = (k // bin_w) * bin_w
+                ql, qh = q_by_bin.get(bk, (-delta_fallback, delta_fallback))
+                hd_dn = min(1.0, max(0.0, hd + ql))
+                hd_up = min(1.0, max(0.0, hd + qh))
+                bands.append(CurveBand(k=k, hd=hd, hd_up=hd_up, hd_dn=hd_dn))
+        return bands
+
+
 def _run_base_query(
         filters: FiltersRequest,
         db: Session,
@@ -571,18 +630,30 @@ async def fit_curve(
         start_from_first_disb: bool | None = Query(None, alias="fromFirstDisbursement"),
         db: Session = Depends(get_db),
 ):
+        try:
+                body = await request.json()
+        except Exception:
+                body = {}
         if start_from_first_disb is None:
-                try:
-                        body = await request.json()
-                except Exception:
-                        body = {}
                 start_from_first_disb = bool(body.get("fromFirstDisbursement", False))
+        band_coverage = body.get("bandCoverage")
+        if band_coverage is not None:
+                try:
+                        band_coverage = float(band_coverage)
+                except Exception:
+                        raise HTTPException(status_code=400, detail="bandCoverage debe ser 0.8, 0.9 o 0.95")
+                if band_coverage not in {0.8, 0.9, 0.95}:
+                        raise HTTPException(status_code=400, detail="bandCoverage debe ser 0.8, 0.9 o 0.95")
         key = json.dumps(
-                {"payload": payload.model_dump(), "start_from_first_disb": start_from_first_disb},
+                {
+                        "payload": payload.model_dump(),
+                        "start_from_first_disb": start_from_first_disb,
+                        "bandCoverage": band_coverage,
+                },
                 sort_keys=True,
         )
         if key in cache:
-                return cache[key]
+                return JSONResponse(content=cache[key])
 
         # Rows for current filter context (used for domain/KPIs). Use both ACTIVE & EXITED
         rows = _run_base_query(
@@ -781,6 +852,14 @@ async def fit_curve(
 
         k_max = max((k for _, k, _ in points_simple), default=0)
         bands = _bands_from_params(b0_display, b1, b2, sigma, k_max)
+        bands_quantile = None
+        if band_coverage is not None and n_points_total >= 3:
+                try:
+                        bq = _bands_from_quantiles(points_simple, b0_display, b1, b2, sigma, k_max, band_coverage)
+                        if bq:
+                                bands_quantile = bq
+                except Exception:
+                        bands_quantile = None
 
         # KPIs for current filter: mean/median residual using all points_simple
         residuals_all = []
@@ -1031,9 +1110,13 @@ async def fit_curve(
                 bands=bands,
                 kDomain=(0, int(k_max)),
                 activePoints=active_points,
+                bandsQuantile=bands_quantile,
         )
-        cache[key] = resp
-        return resp
+        resp_dict = resp.model_dump()
+        if bands_quantile is None:
+                resp_dict.pop("bandsQuantile", None)
+        cache[key] = resp_dict
+        return JSONResponse(content=resp_dict)
 
 @app.get("/api/projects/{iatiidentifier}/timeseries", response_model=ProjectTimeseriesResponse)
 def project_timeseries(
