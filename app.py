@@ -499,6 +499,14 @@ def _bands_from_quantiles(
         k_max: int,
         coverage: float,
 ) -> List[CurveBand]:
+        """Return confidence bands for a fitted curve using vectorized quantiles.
+
+        The input ``points`` are converted to NumPy arrays so that residuals can be
+        grouped by ``k`` bins via ``numpy.digitize``.  Quantiles for each bin are
+        then obtained with ``numpy.nanquantile`` on a dense matrix, avoiding Python
+        loops over individual observations.
+        """
+
         if not points or k_max <= 0:
                 return []
 
@@ -521,32 +529,46 @@ def _bands_from_quantiles(
                 idx = _sample_indices(n_pts, frac)
                 pts = [points[i] for i in idx]
 
-        bins: dict[int, List[float]] = {}
-        for _, k, d in pts:
-                hd = float(logistic3(k, b0, b1, b2))
-                y = float(d - hd)
-                bk = (k // bin_w) * bin_w
-                bins.setdefault(bk, []).append(y)
+        # Convert k and d to NumPy arrays for vectorized operations
+        arr = np.asarray(pts, dtype=object)
+        k = arr[:, 1].astype(int)
+        d = arr[:, 2].astype(float)
 
-        q_by_bin: dict[int, Tuple[float, float]] = {}
-        for bk, vals in bins.items():
-                if len(vals) >= 3:
-                        ql = float(np.quantile(vals, q_low))
-                        qh = float(np.quantile(vals, q_high))
-                else:
-                        ql = -delta_fallback
-                        qh = delta_fallback
-                q_by_bin[bk] = (ql, qh)
+        # Residuals for each point
+        hd = logistic3(k, b0, b1, b2)
+        y = d - hd
 
-        bands: List[CurveBand] = []
-        for k in range(0, k_max + 1):
-                hd = float(logistic3(k, b0, b1, b2))
-                bk = (k // bin_w) * bin_w
-                ql, qh = q_by_bin.get(bk, (-delta_fallback, delta_fallback))
-                hd_dn = min(1.0, max(0.0, hd + ql))
-                hd_up = min(1.0, max(0.0, hd + qh))
-                bands.append(CurveBand(k=k, hd=hd, hd_up=hd_up, hd_dn=hd_dn))
-        return bands
+        # Assign bins using numpy.digitize
+        # Extend edges one bin past ``k_max`` so that ``np.digitize``
+        # never returns an index outside ``0..n_bins-1``.
+        bin_edges = np.arange(0, k_max + bin_w * 2, bin_w)
+        bin_idx = np.digitize(k, bin_edges, right=False) - 1
+        n_bins = bin_edges.size - 1
+
+        # Compute quantiles for each bin. Iterate over unique bin indices only
+        # (at most ~40), avoiding Python loops over individual points.
+        ql = np.full(n_bins, -delta_fallback, dtype=float)
+        qh = np.full(n_bins, delta_fallback, dtype=float)
+        unique_bins = np.unique(bin_idx)
+        for b in unique_bins:
+                vals = y[bin_idx == b]
+                if vals.size >= 3:
+                        ql[b] = np.quantile(vals, q_low)
+                        qh[b] = np.quantile(vals, q_high)
+
+        # Compute bands for k = 0..k_max using array operations
+        ks = np.arange(0, k_max + 1)
+        hd_all = logistic3(ks, b0, b1, b2)
+        ks_idx = np.digitize(ks, bin_edges, right=False) - 1
+        ql_all = ql[ks_idx]
+        qh_all = qh[ks_idx]
+        hd_dn = np.clip(hd_all + ql_all, 0.0, 1.0)
+        hd_up = np.clip(hd_all + qh_all, 0.0, 1.0)
+
+        return [
+                CurveBand(k=int(kv), hd=float(hd), hd_up=float(hu), hd_dn=float(hd_d))
+                for kv, hd, hu, hd_d in zip(ks, hd_all, hd_up, hd_dn)
+        ]
 
 
 def _run_base_query(
