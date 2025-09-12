@@ -4,7 +4,8 @@ import sys
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.dirname(__file__))
-from app import app
+from app import app, _run_base_query, base_query_cache
+from models import FiltersRequest
 
 
 client = TestClient(app)
@@ -14,6 +15,41 @@ def test_health():
     r = client.get('/api/health')
     assert r.status_code == 200
     assert r.json()['status'] == 'ok'
+
+
+def test_run_base_query_streams(monkeypatch):
+    # Use a fake DB result that yields one row per fetchmany call
+    rows_source = [
+        ("P1", None, 0, 0.1),
+        ("P2", None, 1, 0.2),
+        ("P3", None, 2, 0.3),
+    ]
+
+    class FakeResult:
+        def __init__(self, rows):
+            self.rows = list(rows)
+            self.calls = 0
+
+        def fetchmany(self, size=1000):
+            self.calls += 1
+            return [self.rows.pop(0)] if self.rows else []
+
+        def close(self):
+            pass
+
+    fake_result = FakeResult(rows_source)
+
+    class FakeSession:
+        def execute(self, *args, **kwargs):
+            return fake_result
+
+    # Avoid cache interference
+    base_query_cache.clear()
+    monkeypatch.setattr('app._cte_sql_v2', lambda **kw: "SQL")
+    rows = _run_base_query(FiltersRequest(), FakeSession(), select_meta=False)
+    assert rows == rows_source
+    # Should have fetched in multiple batches (one per row plus final empty)
+    assert fake_result.calls >= 4
 
 
 def test_curve_fit_monkeypatch(monkeypatch):
