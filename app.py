@@ -1127,71 +1127,65 @@ def project_timeseries(
         start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
         db: Session = Depends(get_db),
 ):
-        # Build approved amount and approval date using trans_id codes (no joins)
-        approved_sql = text(
+        cte_sql = text(
                 """
-                SELECT SUM(t.value_usd) AS approved
-                FROM public.trans t
-                WHERE t.iatiidentifier=:pid AND t.value_usd>0 AND t.trans_id::text='100'
-                """
-        )
-        row = db.execute(approved_sql, {"pid": iatiidentifier}).fetchone()
-        approved_amount = float(row[0] or 0.0)
-
-        # approval_date fallback
-        appr_sql = text(
-                """
-                SELECT COALESCE(a.approval_date,
-                       MIN(CASE WHEN t.trans_id::text='100' THEN t.iso_date END),
-                       MIN(t.iso_date)) AS approval_date
-                FROM public.activities a
-                LEFT JOIN public.trans t ON t.iatiidentifier=a.iatiidentifier
-                WHERE a.iatiidentifier=:pid
-                GROUP BY a.approval_date
-                """
-        )
-        row2 = db.execute(appr_sql, {"pid": iatiidentifier}).fetchone()
-        approval_date = row2[0] if row2 else None
-
-        # project info
-        info_row = db.execute(
-                text(
-                        "SELECT iatiidentifier, country_id, macrosector_id, modality_id FROM public.activities WHERE iatiidentifier=:pid LIMIT 1"
+                WITH t AS (
+                        SELECT trans_id::text AS trans_id, value_usd, iso_date
+                        FROM public.trans
+                        WHERE iatiidentifier=:pid AND value_usd>0
                 ),
-                {"pid": iatiidentifier},
-        ).fetchone()
-        country_id = info_row[1] if info_row else None
-        macrosector_id = info_row[2] if info_row else None
-        modality_id = info_row[3] if info_row else None
-
-        # disbursements monthly within range
-        disb_sql = text(
-                """
-                SELECT date_trunc('month', iso_date)::date AS ym, SUM(value_usd) AS disb_month
-                FROM public.trans t
-                WHERE t.iatiidentifier=:pid AND t.value_usd>0 AND t.trans_id::text='200'
-                  AND iso_date >= make_date(:yf,1,1) AND iso_date <= make_date(:yt,12,31)
-                GROUP BY 1
-                ORDER BY 1
+                proj AS (
+                        SELECT a.iatiidentifier, a.country_id, a.macrosector_id, a.modality_id,
+                               COALESCE(a.approval_date,
+                                        MIN(CASE WHEN t.trans_id='100' THEN t.iso_date END),
+                                        MIN(t.iso_date)) AS approval_date,
+                               SUM(CASE WHEN t.trans_id='100' THEN t.value_usd ELSE 0 END) AS approved
+                        FROM public.activities a
+                        LEFT JOIN t ON TRUE
+                        WHERE a.iatiidentifier=:pid
+                        GROUP BY a.iatiidentifier, a.country_id, a.macrosector_id, a.modality_id, a.approval_date
+                ),
+                disb AS (
+                        SELECT date_trunc('month', iso_date)::date AS ym, SUM(value_usd) AS disb_month
+                        FROM t
+                        WHERE trans_id='200'
+                          AND iso_date >= make_date(:yf,1,1) AND iso_date <= make_date(:yt,12,31)
+                        GROUP BY 1
+                )
+                SELECT d.ym, d.disb_month, p.approved, p.approval_date,
+                       p.country_id, p.macrosector_id, p.modality_id
+                FROM proj p
+                LEFT JOIN disb d ON TRUE
+                ORDER BY d.ym
                 """
         )
-        rows = db.execute(disb_sql, {"pid": iatiidentifier, "yf": yearFrom, "yt": yearTo}).fetchall()
+        rows = db.execute(cte_sql, {"pid": iatiidentifier, "yf": yearFrom, "yt": yearTo}).fetchall()
+
+        approved_amount = 0.0
+        approval_date = None
+        country_id = macrosector_id = modality_id = None
+        disb_rows: List[tuple] = []
+        if rows:
+                first = rows[0]
+                approved_amount = float(first.approved or 0.0)
+                approval_date = first.approval_date
+                country_id = first.country_id
+                macrosector_id = first.macrosector_id
+                modality_id = first.modality_id
+                disb_rows = [(r.ym, r.disb_month) for r in rows if r.ym is not None]
 
         series: List[ProjectTimeseriesPoint] = []
-        # accumulate
         cum = 0.0
         first_k: int | None = None
-        for (ym, disb_month) in rows:
+        for (ym, disb_month) in disb_rows:
                 mval = float(disb_month or 0.0)
                 cum += mval
-                # compute k and d
                 if approval_date is None:
                         k = None
                         d = 0.0
                 else:
-                        # months between approval_date and ym (SQL's age-based approach)
-                        age_years = (ym.year - approval_date.year)
-                        age_months = (ym.month - approval_date.month)
+                        age_years = ym.year - approval_date.year
+                        age_months = ym.month - approval_date.month
                         k = max(0, age_years * 12 + age_months)
                         d = float(min(1.0, cum / approved_amount)) if approved_amount > 0 else 0.0
                 if start_from_first_disb:
@@ -1199,10 +1193,14 @@ def project_timeseries(
                                 continue
                         if first_k is None:
                                 first_k = int(k or 0)
-                        k = (int(k or 0) - first_k)
+                        k = int(k or 0) - first_k
                 series.append(
                         ProjectTimeseriesPoint(
-                                ym=ym.isoformat(), disb_month=mval, disb_cum_usd=float(cum), k=int(k or 0), d=float(d)
+                                ym=ym.isoformat(),
+                                disb_month=mval,
+                                disb_cum_usd=float(cum),
+                                k=int(k or 0),
+                                d=float(d),
                         )
                 )
 

@@ -1,10 +1,14 @@
 import os
 import random
 import sys
+from collections import namedtuple
+from datetime import date
+
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.dirname(__file__))
-from app import app
+from app import app, project_timeseries
 
 
 client = TestClient(app)
@@ -188,5 +192,51 @@ def test_cors_preflight():
     )
     assert r.status_code == 204
     assert r.headers['access-control-allow-origin'] == 'https://clientcurvasdesembolso-production.up.railway.app'
+
+
+def test_project_timeseries_single_query():
+    Row = namedtuple(
+        'Row',
+        'ym disb_month approved approval_date country_id macrosector_id modality_id',
+    )
+    rows = [
+        Row(date(2020, 2, 1), 50.0, 300.0, date(2020, 1, 15), 'AA', 11, 111),
+        Row(date(2020, 3, 1), 250.0, 300.0, date(2020, 1, 15), 'AA', 11, 111),
+        Row(date(2021, 2, 1), 200.0, 300.0, date(2020, 1, 15), 'AA', 11, 111),
+    ]
+
+    class DummyResult:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class DummyDB:
+        def __init__(self, rows):
+            self.rows = rows
+            self.call_count = 0
+
+        def execute(self, sql, params):
+            self.call_count += 1
+            assert 'WITH t AS' in str(sql)
+            return DummyResult(self.rows)
+
+    db = DummyDB(rows)
+    resp = project_timeseries('P1', 2020, 2021, False, db)
+
+    assert db.call_count == 1
+    assert resp.project.approved_amount == 300.0
+    assert resp.project.country_id == 'AA'
+    ks = [p.k for p in resp.series]
+    assert ks == [1, 2, 13]
+    disb_months = [p.disb_month for p in resp.series]
+    assert disb_months == [50.0, 250.0, 200.0]
+    cum = [p.disb_cum_usd for p in resp.series]
+    assert cum == [50.0, 300.0, 500.0]
+    ds = [p.d for p in resp.series]
+    assert ds[0] == pytest.approx(1 / 6)
+    assert ds[1] == 1.0
+    assert ds[2] == 1.0
 
 
