@@ -43,3 +43,9 @@ La respuesta incluye la curva ajustada y las bandas estadísticas:
 - `bandsQuantile`: bandas basadas en cuantiles, retornadas solo cuando se especifica `bandCoverage`.
 - `params.band_z`: valor z usado para construir `bands`.
 
+### Notas técnicas
+
+La consulta base interna (`_run_base_query`) ahora utiliza un cursor del lado del servidor y
+`fetchmany()` para obtener los resultados de manera incremental y evitar picos de memoria al
+procesar grandes volúmenes de datos.
+

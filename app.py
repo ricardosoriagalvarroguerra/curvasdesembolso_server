@@ -597,8 +597,15 @@ def _run_base_query(
                 db.execute(text("SET LOCAL statement_timeout = 60000"))
         except Exception:
                 pass
-        res = db.execute(text(sql), params)
-        rows = res.fetchall()
+        # Stream results server-side to avoid loading all rows into memory at once
+        res = db.execute(text(sql).execution_options(stream_results=True), params)
+        rows: List[Row] = []
+        while True:
+                chunk = res.fetchmany(1000)
+                if not chunk:
+                        break
+                rows.extend(chunk)
+        res.close()
         if start_from_first_disb:
                 adj_rows: List[tuple] = []
                 first_k: dict[str, int] = {}
