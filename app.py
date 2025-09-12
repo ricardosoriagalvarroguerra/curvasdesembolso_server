@@ -89,6 +89,8 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 # Simple in-memory caches with TTL
 cache = TTLCache(maxsize=128, ttl=int(os.getenv("CACHE_TTL_SECONDS", "180")))
 filters_cache = TTLCache(maxsize=8, ttl=int(os.getenv("FILTERS_CACHE_TTL_SECONDS", "600")))
+# Cache for project timeseries responses: up to 512 items kept for 600 seconds (10 min)
+# by default. The TTL can be overridden via the ``TS_CACHE_TTL_SECONDS`` env var.
 ts_cache = TTLCache(maxsize=512, ttl=int(os.getenv("TS_CACHE_TTL_SECONDS", "600")))
 base_query_cache = TTLCache(maxsize=128, ttl=int(os.getenv("BASE_QUERY_CACHE_TTL_SECONDS", "300")))
 
@@ -1127,6 +1129,11 @@ def project_timeseries(
         start_from_first_disb: bool = Query(False, alias="fromFirstDisbursement"),
         db: Session = Depends(get_db),
 ):
+        # Check cache before hitting the DB
+        key = (iatiidentifier, yearFrom, yearTo, start_from_first_disb)
+        if key in ts_cache:
+                return ts_cache[key]
+
         # Build approved amount and approval date using trans_id codes (no joins)
         approved_sql = text(
                 """
@@ -1205,8 +1212,7 @@ def project_timeseries(
                                 ym=ym.isoformat(), disb_month=mval, disb_cum_usd=float(cum), k=int(k or 0), d=float(d)
                         )
                 )
-
-        return ProjectTimeseriesResponse(
+        resp = ProjectTimeseriesResponse(
                 project=ProjectInfo(
                         iatiidentifier=iatiidentifier,
                         country_id=country_id,
@@ -1216,4 +1222,6 @@ def project_timeseries(
                 ),
                 series=series,
         )
+        ts_cache[key] = resp
+        return resp
 
